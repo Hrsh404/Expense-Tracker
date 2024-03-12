@@ -1,0 +1,49 @@
+
+.row{  
+    display: flex;
+    -ms-flex-wrap: wrap;
+    flex-wrap: wrap;
+    margin-right: -530px;
+    margin-left: -555px;
+  
+}
+
+body {
+    background-color: #e8d123;
+    font-family: 'Nunito', sans-serif;
+}
+
+.card {
+    border: none;
+    box-shadow: 0 0 55px rgba(249, 12, 4, 0.1);
+}
+
+.card-title {
+    text-align: center;
+}
+
+.list-group-item {
+    animation: fadeIn 0.5s ease-out;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.list-group-item.deleting {
+    animation: fadeOut 0.5s ease-out forwards;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeOut {
+    from { opacity: 1; }
+    to { opacity: 0; transform: translateY(-20px); }
+}
+
+.fa-trash, .fa-edit {
+    cursor: pointer;
+    margin-left: 10px;
+}
