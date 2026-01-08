@@ -37,6 +37,46 @@
     </div>
 
 
+@RestController
+@RequestMapping("/api/abc/universal")
+public class UniversalController {
+
+    private final Map<String, ChannelService> channelServices;
+
+    public UniversalController(List<ChannelService> services) {
+        this.channelServices = services.stream()
+                .collect(Collectors.toMap(ChannelService::getChannelIdentifier, s -> s));
+    }
+
+    @PostMapping("/")
+    public ResponseEntity<String> handleRequest(
+            @RequestBody UniversalRequestDTO request) {
+
+        String channelIdentifier = request.getChannelIdentifier();
+        String channelCode = request.getChannelCode();
+        Object data = request.getData();
+
+        ChannelService service = channelServices.get(channelIdentifier.toUpperCase());
+        if (service == null) {
+            return ResponseEntity.badRequest().body("Unknown channelIdentifier");
+        }
+
+        try {
+            service.process(channelCode, data);
+            return ResponseEntity.ok("Processed successfully");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body("Validation failed: " + e.getMessage());
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Processing error: " + e.getMessage());
+        }
+    }
+}
+
+
+	
+---------------
+
 package com.example.Universal.Controller;
 
 import java.util.List;
