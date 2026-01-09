@@ -135,6 +135,29 @@ public interface ChannelService {
 	    void process(String channelCode, Object data);
 }
 -------------------
+@RestController
+@RequestMapping("/api/NE/universal")
+public class UniversalController {
+
+    private final Map<String, ChannelService> channelServices;
+
+    // CONSTRUCTOR USING TRADITIONAL INDEXED FOR-LOOP
+    public UniversalController(List<ChannelService> services) {
+        this.channelServices = new HashMap<>();
+        
+        // Traditional loop: starts at 0, goes until the end of the list
+        for (int i = 0; i < services.size(); i++) {
+            // Get the service at the current position
+            ChannelService s = services.get(i);
+            
+            // Extract the key and put the service into the map
+            String identifier = s.getChannelIdentifier();
+            this.channelServices.put(identifier, s);
+        }
+    }
+
+    // ... rest of the handleRequest method remains the same
+}
 
     
     <!-- Bootstrap and jQuery -->
