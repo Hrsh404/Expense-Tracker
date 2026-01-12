@@ -66,6 +66,75 @@ public class AllowedChannelConfig {
     }
 }
 
+
+
+
+-----------
+
+
+		package com.example.universal.service;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.io.File;
+import java.io.FileWriter;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.UUID;
+
+@Service
+public class CommonProcessingService {
+
+    @Value("${universal.file.base-path}")
+    private String basePath;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    public void process(String channelIdentifier,
+                        String channelCode,
+                        Object data) {
+
+        try {
+            // Create directory: /basePath/CIF/001/
+            File dir = new File(basePath
+                    + File.separator + channelIdentifier
+                    + File.separator + channelCode);
+
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+
+            // Unique file name (NO overwrite)
+            String fileName = channelIdentifier + "_"
+                    + channelCode + "_"
+                    + LocalDateTime.now()
+                        .format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"))
+                    + "_"
+                    + UUID.randomUUID()
+                    + ".txt";
+
+            File file = new File(dir, fileName);
+
+            try (FileWriter writer = new FileWriter(file)) {
+                writer.write(objectMapper.writeValueAsString(data));
+            }
+
+            // Simple audit log (console only)
+            System.out.println(
+                    "FILE GENERATED :: " + file.getAbsolutePath()
+            );
+
+        } catch (Exception e) {
+            throw new RuntimeException("File processing failed", e);
+        }
+    }
+}
+
+
+
+		
 	
     <!-- Bootstrap and jQuery -->
     <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js"></script>
