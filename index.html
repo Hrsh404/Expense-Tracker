@@ -35,102 +35,64 @@
             </div>
         </div>
     </div>
+package com.example.Universal.Service;
 
-
-package com.example.universal.config;
-
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-
-import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
-@Component
-public class AllowedChannelConfig {
-
-    private final Set<String> allowedChannels;
-
-    public AllowedChannelConfig(
-            @Value("${universal.allowed.channels}") String channels) {
-
-        this.allowedChannels = Stream.of(channels.split(","))
-                .map(String::trim)
-                .map(String::toUpperCase)
-                .collect(Collectors.toSet());
-    }
-
-    public boolean isAllowed(String channelIdentifier) {
-        return channelIdentifier != null
-                && allowedChannels.contains(channelIdentifier.toUpperCase());
-    }
-}
-
-
-
-
------------
-
-
-		package com.example.universal.service;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.UUID;
+import java.io.IOException;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import org.springframework.stereotype.Service;
+
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.exc.JsonNodeException;
 
 @Service
 public class CommonProcessingService {
 
-    @Value("${universal.file.base-path}")
-    private String basePath;
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    public void process(String channelIdentifier,
-                        String channelCode,
-                        Object data) {
-
+	
+	
+    public void process(String channelCode, String channelIdentifier, Object validatedData) {
         try {
-            // Create directory: /basePath/CIF/001/
-            File dir = new File(basePath
-                    + File.separator + channelIdentifier
-                    + File.separator + channelCode);
+            // Convert object to pipe-separated TXT
+            String txtData = convertToPipeSeparated(validatedData);
 
-            if (!dir.exists()) {
-                dir.mkdirs();
+            // Generate file path
+            String fileName = channelCode + "_" + System.currentTimeMillis() + "_" +
+                              java.util.UUID.randomUUID() + ".txt";
+            String filePath = "output/" + channelIdentifier + "/" + fileName;
+
+            File file = new File(filePath);
+            file.getParentFile().mkdirs();
+
+            // Write using BufferedWriter
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
+                writer.write(txtData);
+
+                writer.flush();
             }
 
-            // Unique file name (NO overwrite)
-            String fileName = channelIdentifier + "_"
-                    + channelCode + "_"
-                    + LocalDateTime.now()
-                        .format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"))
-                    + "_"
-                    + UUID.randomUUID()
-                    + ".txt";
+            // Audit logging
+            System.out.println("TXT generated for " + channelIdentifier +
+                    " at " + filePath);
 
-            File file = new File(dir, fileName);
-
-            try (FileWriter writer = new FileWriter(file)) {
-                writer.write(objectMapper.writeValueAsString(data));
-            }
-
-            // Simple audit log (console only)
-            System.out.println(
-                    "FILE GENERATED :: " + file.getAbsolutePath()
-            );
-
-        } catch (Exception e) {
-            throw new RuntimeException("File processing failed", e);
+        } catch (IOException e) {
+            throw new RuntimeException("Error generating TXT file", e);
         }
     }
+
+    private String convertToPipeSeparated(Object dto) throws JsonNodeException {
+        ObjectMapper mapper = new ObjectMapper();
+        Map<String, Object> map = mapper.convertValue(dto, Map.class);
+
+        return map.values().stream()
+                .map(String::valueOf)
+                .collect(Collectors.joining("|"));
+    }
 }
+
 
 
 
