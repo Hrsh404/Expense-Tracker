@@ -94,6 +94,69 @@ public class CommonProcessingService {
 
 
 
+			import java.io.*;
+import java.nio.file.*;
+import java.util.regex.*;
+
+public class MurUpdater {
+
+    public static void main(String[] args) throws IOException {
+        String folderPath = "C:/mtfiles"; // your folder
+
+        Files.list(Paths.get(folderPath))
+                .filter(Files::isRegularFile)
+                .forEach(path -> processFile(path));
+    }
+
+    private static void processFile(Path path) {
+        try {
+            String content = new String(Files.readAllBytes(path));
+
+            Pattern pattern = Pattern.compile("\\{3:\\{108:(.*?)}}");
+            Matcher matcher = pattern.matcher(content);
+
+            if (matcher.find()) {
+                String oldMur = matcher.group(1);
+
+                String newMur = incrementMur(oldMur);
+
+                content = content.replace(oldMur, newMur);
+
+                Files.write(path, content.getBytes());
+
+                System.out.println("Updated: " + path.getFileName());
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static String incrementMur(String mur) {
+        // Separate prefix and number
+        String prefix = mur.replaceAll("\\d+$", "");
+        String numberPart = mur.substring(prefix.length());
+
+        long num = Long.parseLong(numberPart);
+        num++;
+
+        String newNumber = String.format("%0" + numberPart.length() + "d", num);
+
+        String result = prefix + newNumber;
+
+        // Ensure length = 16
+        if (result.length() > 16) {
+            result = result.substring(0, 16);
+        } else if (result.length() < 16) {
+            result = String.format("%-16s", result).replace(' ', '0');
+        }
+
+        return result;
+    }
+}
+
+
+
 		
 	
     <!-- Bootstrap and jQuery -->
