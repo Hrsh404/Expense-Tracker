@@ -157,6 +157,63 @@ public class MurUpdater {
 
 
 
+
+			import java.io.*;
+import java.nio.file.*;
+import java.util.regex.*;
+
+public class MurUpdater {
+
+    public static void main(String[] args) throws IOException {
+        String inputDir = "C:/mtfiles";
+        String outputDir = "C:/mtfiles_updated";
+
+        Files.createDirectories(Paths.get(outputDir)); // ensure folder exists
+
+        Files.list(Paths.get(inputDir))
+                .filter(Files::isRegularFile)
+                .forEach(path -> processFile(path, outputDir));
+    }
+
+    private static void processFile(Path inputPath, String outputDir) {
+        try {
+            String content = new String(Files.readAllBytes(inputPath));
+
+            Pattern pattern = Pattern.compile("\\{3:\\{108:(.*?)}}");
+            Matcher matcher = pattern.matcher(content);
+
+            if (matcher.find()) {
+                String oldMur = matcher.group(1);
+                String newMur = incrementMur(oldMur);
+
+                content = content.replace(oldMur, newMur);
+            }
+
+            // 👉 create output file path
+            Path outputPath = Paths.get(outputDir, inputPath.getFileName().toString());
+
+            Files.write(outputPath, content.getBytes());
+
+            System.out.println("Saved: " + outputPath);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    // last-2-digit rollover logic
+    private static String incrementMur(String mur) {
+        String prefix = mur.substring(0, mur.length() - 2);
+        String lastTwo = mur.substring(mur.length() - 2);
+
+        int num = Integer.parseInt(lastTwo);
+
+        num = (num == 99) ? 1 : num + 1;
+
+        return prefix + String.format("%02d", num);
+    }
+}
+
 		
 	
     <!-- Bootstrap and jQuery -->
