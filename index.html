@@ -157,6 +157,53 @@ public class MurUpdater {
 
 
 
+			import java.io.*;
+import java.nio.file.*;
+import java.util.List;
+import java.util.stream.Collectors;
+
+// Point to your folder containing MT txt files
+String inputFolderPath = "D:\\Harsh\\MT_TestFiles\\";
+
+List<Path> mtFiles = Files.walk(Paths.get(inputFolderPath))
+    .filter(p -> p.toString().endsWith(".txt"))
+    .collect(Collectors.toList());
+
+for (Path mtFile : mtFiles) {
+    System.out.println("\n===== Processing: " + mtFile.getFileName() + " =====");
+    
+    try {
+        // Read file content as String
+        String swiftMessage = new String(Files.readAllBytes(mtFile));
+
+        // Your existing code below — unchanged
+        MXConversionUtilities mxConversionUtilities = MXConversionUtilities.getInstance();
+        MTMessage mtmsg = MTUtilities.getInstance().generateMTMessageFromString(swiftMessage);
+
+        System.out.println(mtmsg.toString());
+
+        XmlCore xmlCore = mxConversionUtilities.generateRawMXFromMTMessage(mtmsg);
+
+        XSDCheck xsdCheck = XSDCheck.getInstance("D:\\Harsh\\XSD\\xsd");
+        xsdCheck.rearrangeXmlContentsAsPerXSD(xmlCore);
+        xsdCheck.rearrangeXmlContentsOutsideXsd1(xmlCore);
+
+        System.out.println(new ConstructUtility().xmlToString(xmlCore));
+
+        ValidationUtilities validationUtilities = ValidationUtilities.getInstance();
+        validationUtilities.parseAndInvokeValidations(xmlCore);
+
+    } catch (Exception e) {
+        // Don't stop — log error and continue to next file
+        System.out.println("ERROR in file " + mtFile.getFileName() + ": " + e.getMessage());
+    }
+}
+
+
+
+
+			
+
 
 			import java.io.*;
 import java.nio.file.*;
