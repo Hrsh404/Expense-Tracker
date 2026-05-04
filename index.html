@@ -1,144 +1,110 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Enhanced Expense Tracker</title>
-    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
-    <link href="https://use.fontawesome.com/releases/v5.7.2/css/all.css" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-    <div class="container mt-5">
-        <div class="row">
-            <div class="col-lg-6 mx-auto">
-                <div class="card">
-                    <div class="card-body">
-                        <h5 class="card-title">Expense Tracker</h5>
-                        <form id="expense-form" class="mb-4">
-                            <input type="hidden" id="expenseId">
-                            <div class="form-group">
-                                <label for="expenseName">Expense Name</label>
-                                <input type="text" class="form-control" id="expenseName" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="expenseAmount">Amount (Rs)</label>
-                                <input type="number" class="form-control" id="expenseAmount" required>
-                            </div>
-                            <button type="submit" class="btn btn-primary">Add Expense</button>
-                        </form>
-                        <ul class="list-group" id="expenseList">
-                      
-                        </ul>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-package com.example.Universal.Service;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileWriter;
+
+
 import java.io.IOException;
-import java.util.Map;
+import java.nio.file.*;
+import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-import org.springframework.stereotype.Service;
+public class TestMXUtilities {
 
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.exc.JsonNodeException;
+    public static void main(String[] args) {
 
-@Service
-public class CommonProcessingService {
+        long overallStart = System.currentTimeMillis();
 
-	
-	
-    public void process(String channelCode, String channelIdentifier, Object validatedData) {
-        try {
-            // Convert object to pipe-separated TXT
-            String txtData = convertToPipeSeparated(validatedData);
+        String inputFolderPath = "D:\\Harsh\\MT_TestFiles\\";
+        String xsdPath = "D:\\Harsh\\XSD\\xsd";
 
-            // Generate file path
-            String fileName = channelCode + "_" + System.currentTimeMillis() + "_" +
-                              java.util.UUID.randomUUID() + ".txt";
-            String filePath = "output/" + channelIdentifier + "/" + fileName;
+        MXConversionUtilities mxConversionUtilities = MXConversionUtilities.getInstance();
 
-            File file = new File(filePath);
-            file.getParentFile().mkdirs();
+        try (Stream<Path> stream = Files.walk(Paths.get(inputFolderPath))) {
 
-            // Write using BufferedWriter
-            try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
-                writer.write(txtData);
+            List<Path> mtFiles = stream
+                    .filter(p -> p.toString().endsWith(".txt"))
+                    .collect(Collectors.toList());
+
+            if (mtFiles.isEmpty()) {
+                System.out.println("No .txt files found in: " + inputFolderPath);
+                return;
             }
 
-            // Audit logging
-            System.out.println("TXT generated for " + channelIdentifier +
-                    " at " + filePath);
+            System.out.println("Total files found: " + mtFiles.size());
+
+            int success = 0;
+            int failed = 0;
+
+            for (Path mtFile : mtFiles) {
+                System.out.println("\n========================================");
+                System.out.println("Processing: " + mtFile.getFileName());
+                System.out.println("========================================");
+
+                long startTime = System.currentTimeMillis();
+
+                try {
+                    // Read MT file content
+                    String swiftMessage = new String(Files.readAllBytes(mtFile));
+
+                    // Generate MTMessage from string
+                    MTMessage mtmsg = MTUtilities.getInstance()
+                            .generateMTMessageFromString(swiftMessage);
+
+                    System.out.println(mtmsg.toString());
+
+                    // Convert MT to MX
+                    XmlCore xmlCore = mxConversionUtilities
+                            .generateRawMXFromMTMessage(mtmsg);
+
+                    // XSD rearrangement
+                    XSDCheck xsdCheck = XSDCheck.getInstance(xsdPath);
+                    xsdCheck.rearrangeXmlContentsAsPerXSD(xmlCore);
+                    xsdCheck.rearrangeXmlContentsOutsideXsd1(xmlCore);
+
+                    // Print MX output
+                    System.out.println(new ConstructUtility().xmlToString(xmlCore));
+
+                    // Validate
+                    ValidationUtilities validationUtilities = ValidationUtilities.getInstance();
+                    validationUtilities.parseAndInvokeValidations(xmlCore);
+
+                    long timeTaken = System.currentTimeMillis() - startTime;
+                    System.out.println("SUCCESS | Time: " + timeTaken + " ms");
+                    success++;
+
+                } catch (Exception e) {
+                    System.out.println("FAILED | File: " + mtFile.getFileName());
+                    System.out.println("Reason: " + e.getMessage());
+                    e.printStackTrace();
+                    failed++;
+                }
+            }
+
+            // Summary
+            System.out.println("\n========================================");
+            System.out.println("SUMMARY");
+            System.out.println("========================================");
+            System.out.println("Total Files  : " + mtFiles.size());
+            System.out.println("Success      : " + success);
+            System.out.println("Failed       : " + failed);
+            System.out.println("Total Time   : " + (System.currentTimeMillis() - overallStart) + " ms");
 
         } catch (IOException e) {
-            throw new RuntimeException("Error generating TXT file", e);
+            System.out.println("Could not read folder: " + inputFolderPath);
+            e.printStackTrace();
         }
-    }
-
-    private String convertToPipeSeparated(Object dto) throws JsonNodeException {
-        ObjectMapper mapper = new ObjectMapper();
-        Map<String, Object> map = mapper.convertValue(dto, Map.class);
-
-        return map.values().stream()
-                .map(String::valueOf)
-                .collect(Collectors.joining("|"));
     }
 }
 
 
 
 
-			import java.io.*;
-import java.nio.file.*;
-import java.util.regex.*;
 
-public class MurUpdater {
 
-    public static void main(String[] args) throws IOException {
-        String folderPath = "C:/mtfiles"; // your folder
 
-        Files.list(Paths.get(folderPath))
-                .filter(Files::isRegularFile)
-                .forEach(path -> processFile(path));
-    }
 
-    private static void processFile(Path path) {
-        try {
-            String content = new String(Files.readAllBytes(path));
 
-            Pattern pattern = Pattern.compile("\\{3:\\{108:(.*?)}}");
-            Matcher matcher = pattern.matcher(content);
 
-            if (matcher.find()) {
-                String oldMur = matcher.group(1);
-
-                String newMur = incrementMur(oldMur);
-
-                content = content.replace(oldMur, newMur);
-
-                Files.write(path, content.getBytes());
-
-                System.out.println("Updated: " + path.getFileName());
-            }
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    private static String incrementMur(String mur) {
-        // Separate prefix and number
-        String prefix = mur.replaceAll("\\d+$", "");
-        String numberPart = mur.substring(prefix.length());
-
-        long num = Long.parseLong(numberPart);
-        num++;
+num++;
 
         String newNumber = String.format("%0" + numberPart.length() + "d", num);
 
@@ -248,6 +214,12 @@ public class MurUpdater {
         }
     }
 
+
+
+
+
+
+	
     // last-2-digit rollover logic
     private static String incrementMur(String mur) {
         String prefix = mur.substring(0, mur.length() - 2);
