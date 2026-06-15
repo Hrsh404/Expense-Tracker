@@ -1,6 +1,7 @@
 
 
 
+
 import java.io.IOException;
 import java.nio.file.*;
 import java.util.List;
@@ -137,7 +138,15 @@ List<Path> mtFiles = Files.walk(Paths.get(inputFolderPath))
 
 for (Path mtFile : mtFiles) {
     System.out.println("\n===== Processing: " + mtFile.getFileName() + " =====");
-    
+	
+
+
+
+
+
+
+
+
     try {
         // Read file content as String
         String swiftMessage = new String(Files.readAllBytes(mtFile));
