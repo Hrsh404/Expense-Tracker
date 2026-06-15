@@ -1,273 +1,182 @@
 
+package com.tcs.sbi.main.utility;
 
+import java.security.SecureRandom;
+import java.text.SimpleDateFormat;
+import java.util.Base64;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Scanner;
 
+import org.apache.commons.lang3.RandomStringUtils;
+import com.google.gson.Gson;
 
-import java.io.IOException;
-import java.nio.file.*;
-import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+/**
+ * EncryptionUtility
+ * -----------------
+ * Standalone encryption tool for EIS requests.
+ * Takes user inputs via Scanner, encrypts the payload using AES-GCM,
+ * signs it with a private key, and prints the final JSON request body.
+ *
+ * Package as: EncryptionUtility.jar
+ * Run with : java -jar EncryptionUtility.jar
+ */
+public class EncryptionUtility {
 
-public class TestMXUtilities {
+    // -----------------------------------------------------------------------
+    // Key / Certificate paths — update these before building the JAR
+    // -----------------------------------------------------------------------
+    private static final String PUBLIC_CERT_PATH    = "E:\\APIFOLDER_STRUCUTRE\\Keys\\NE_Pub.cer";
+    private static final String PRIVATE_KEY_PATH    = "E:\\APIFOLDER_STRUCUTRE\\Keys\\NE_PrivateKey.key";
+    private static final String NE_PUBLIC_KEY_PATH  = "E:\\APIFOLDER_STRUCUTRE\\Keys\\Neeispublickey.pem";
 
+    // -----------------------------------------------------------------------
+    // Entry point
+    // -----------------------------------------------------------------------
     public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
 
-        long overallStart = System.currentTimeMillis();
+        System.out.println("============================================================");
+        System.out.println("          EIS Encryption Utility — Request Builder          ");
+        System.out.println("============================================================");
 
-        String inputFolderPath = "D:\\Harsh\\MT_TestFiles\\";
-        String xsdPath = "D:\\Harsh\\XSD\\xsd";
+        // ---- Collect inputs ------------------------------------------------
+        String inputSource = promptRequired(scanner, "Enter Input Source (e.g. NER)         : ");
+        String channelId   = promptRequired(scanner, "Enter Channel ID   (e.g. FE)          : ");
+        String alertCode   = promptRequired(scanner, "Enter Alert Code   (e.g. F1)          : ");
+        String tellerId    = promptRequired(scanner, "Enter Teller ID    (e.g. 123j67)      : ");
+        String branchCode  = promptRequired(scanner, "Enter Branch Code  (e.g. 1234)        : ");
+        String tranNum     = promptRequired(scanner, "Enter Tran Number  (e.g. 132456)      : ");
 
-        MXConversionUtilities mxConversionUtilities = MXConversionUtilities.getInstance();
+        System.out.print("Enter Request Data (pipe-separated, blank for empty) : ");
+        String reqData = scanner.nextLine().trim();
 
-        try (Stream<Path> stream = Files.walk(Paths.get(inputFolderPath))) {
+        scanner.close();
 
-            List<Path> mtFiles = stream
-                    .filter(p -> p.toString().endsWith(".txt"))
-                    .collect(Collectors.toList());
+        System.out.println("\n------------------------------------------------------------");
+        System.out.println("Processing — please wait...");
+        System.out.println("------------------------------------------------------------\n");
 
-            if (mtFiles.isEmpty()) {
-                System.out.println("No .txt files found in: " + inputFolderPath);
-                return;
-            }
+        // ---- Generate AES key ----------------------------------------------
+        String aesKey = RandomStringUtils.randomAlphanumeric(32);
+        System.out.println("Generated AES Key : " + aesKey);
 
-            System.out.println("Total files found: " + mtFiles.size());
-
-            int success = 0;
-            int failed = 0;
-
-            for (Path mtFile : mtFiles) {
-                System.out.println("\n========================================");
-                System.out.println("Processing: " + mtFile.getFileName());
-                System.out.println("========================================");
-
-                long startTime = System.currentTimeMillis();
-
-                try {
-                    // Read MT file content
-                    String swiftMessage = new String(Files.readAllBytes(mtFile));
-
-                    // Generate MTMessage from string
-                    MTMessage mtmsg = MTUtilities.getInstance()
-                            .generateMTMessageFromString(swiftMessage);
-
-                    System.out.println(mtmsg.toString());
-
-                    // Convert MT to MX
-                    XmlCore xmlCore = mxConversionUtilities
-                            .generateRawMXFromMTMessage(mtmsg);
-
-                    // XSD rearrangement
-                    XSDCheck xsdCheck = XSDCheck.getInstance(xsdPath);
-                    xsdCheck.rearrangeXmlContentsAsPerXSD(xmlCore);
-                    xsdCheck.rearrangeXmlContentsOutsideXsd1(xmlCore);
-
-                    // Print MX output
-                    System.out.println(new ConstructUtility().xmlToString(xmlCore));
-
-                    // Validate
-                    ValidationUtilities validationUtilities = ValidationUtilities.getInstance();
-                    validationUtilities.parseAndInvokeValidations(xmlCore);
-
-                    long timeTaken = System.currentTimeMillis() - startTime;
-                    System.out.println("SUCCESS | Time: " + timeTaken + " ms");
-                    success++;
-
-                } catch (Exception e) {
-                    System.out.println("FAILED | File: " + mtFile.getFileName());
-                    System.out.println("Reason: " + e.getMessage());
-                    e.printStackTrace();
-                    failed++;
-                }
-            }
-
-            // Summary
-            System.out.println("\n========================================");
-            System.out.println("SUMMARY");
-            System.out.println("========================================");
-            System.out.println("Total Files  : " + mtFiles.size());
-            System.out.println("Success      : " + success);
-            System.out.println("Failed       : " + failed);
-            System.out.println("Total Time   : " + (System.currentTimeMillis() - overallStart) + " ms");
-
-        } catch (IOException e) {
-            System.out.println("Could not read folder: " + inputFolderPath);
-            e.printStackTrace();
-        }
-    }
-}
-
-
-
-
-
-
-
-
-
-
-num++;
-
-        String newNumber = String.format("%0" + numberPart.length() + "d", num);
-
-        String result = prefix + newNumber;
-
-        // Ensure length = 16
-        if (result.length() > 16) {
-            result = result.substring(0, 16);
-        } else if (result.length() < 16) {
-            result = String.format("%-16s", result).replace(' ', '0');
-        }
-
-        return result;
-    }
-}
-
-
-
-			import java.io.*;
-import java.nio.file.*;
-import java.util.List;
-import java.util.stream.Collectors;
-
-// Point to your folder containing MT txt files
-String inputFolderPath = "D:\\Harsh\\MT_TestFiles\\";
-
-List<Path> mtFiles = Files.walk(Paths.get(inputFolderPath))
-    .filter(p -> p.toString().endsWith(".txt"))
-    .collect(Collectors.toList());
-
-for (Path mtFile : mtFiles) {
-    System.out.println("\n===== Processing: " + mtFile.getFileName() + " =====");
-	
-
-
-
-
-
-
-
-
-    try {
-        // Read file content as String
-        String swiftMessage = new String(Files.readAllBytes(mtFile));
-
-        // Your existing code below — unchanged
-        MXConversionUtilities mxConversionUtilities = MXConversionUtilities.getInstance();
-        MTMessage mtmsg = MTUtilities.getInstance().generateMTMessageFromString(swiftMessage);
-
-        System.out.println(mtmsg.toString());
-
-        XmlCore xmlCore = mxConversionUtilities.generateRawMXFromMTMessage(mtmsg);
-
-        XSDCheck xsdCheck = XSDCheck.getInstance("D:\\Harsh\\XSD\\xsd");
-        xsdCheck.rearrangeXmlContentsAsPerXSD(xmlCore);
-        xsdCheck.rearrangeXmlContentsOutsideXsd1(xmlCore);
-
-        System.out.println(new ConstructUtility().xmlToString(xmlCore));
-
-        ValidationUtilities validationUtilities = ValidationUtilities.getInstance();
-        validationUtilities.parseAndInvokeValidations(xmlCore);
-
-    } catch (Exception e) {
-        // Don't stop — log error and continue to next file
-        System.out.println("ERROR in file " + mtFile.getFileName() + ": " + e.getMessage());
-    }
-}
-
-
-
-
-			
-
-
-			import java.io.*;
-import java.nio.file.*;
-import java.util.regex.*;
-
-public class MurUpdater {
-
-    public static void main(String[] args) throws IOException {
-        String inputDir = "C:/mtfiles";
-        String outputDir = "C:/mtfiles_updated";
-
-        Files.createDirectories(Paths.get(outputDir)); // ensure folder exists
-
-        Files.list(Paths.get(inputDir))
-                .filter(Files::isRegularFile)
-                .forEach(path -> processFile(path, outputDir));
-    }
-
-    private static void processFile(Path inputPath, String outputDir) {
+        // ---- Build & encrypt request ---------------------------------------
         try {
-            String content = new String(Files.readAllBytes(inputPath));
-
-            Pattern pattern = Pattern.compile("\\{3:\\{108:(.*?)}}");
-            Matcher matcher = pattern.matcher(content);
-
-            if (matcher.find()) {
-                String oldMur = matcher.group(1);
-                String newMur = incrementMur(oldMur);
-
-                content = content.replace(oldMur, newMur);
-            }
-
-            // 👉 create output file path
-            Path outputPath = Paths.get(outputDir, inputPath.getFileName().toString());
-
-            Files.write(outputPath, content.getBytes());
-
-            System.out.println("Saved: " + outputPath);
-
+            encryptAndPrint(aesKey, inputSource, channelId, alertCode,
+                            tellerId, branchCode, tranNum, reqData);
         } catch (Exception e) {
+            System.err.println("[ERROR] Encryption failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        // ---- RSA-encrypt the AES key (Access Token) -----------------------
+        try {
+            String accessToken = utility.RSAEncrypt(aesKey, PUBLIC_CERT_PATH);
+            System.out.println("\nAccess Token (RSA-encrypted AES key) :");
+            System.out.println(accessToken);
+        } catch (Exception e) {
+            System.err.println("[ERROR] RSA encryption failed: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Core encryption logic
+    // -----------------------------------------------------------------------
+    private static void encryptAndPrint(String aesKey,
+                                        String inputSource,
+                                        String channelId,
+                                        String alertCode,
+                                        String tellerId,
+                                        String branchCode,
+                                        String tranNum,
+                                        String reqData) throws Exception {
 
+        // Build request map
+        Map<String, Object> queryParams = new HashMap<>();
+        queryParams.put("channelId",  channelId);
+        queryParams.put("alertCode",  alertCode);
+        queryParams.put("tranNum",    tranNum);
+        queryParams.put("tellerId",   tellerId);
+        queryParams.put("branchCode", branchCode);
+        queryParams.put("data",       reqData);
 
+        Gson gson = new Gson();
+        String plainJson = gson.toJson(queryParams);
 
+        System.out.println("\nPlain Request JSON  : " + plainJson);
+        System.out.println("Payload Length      : " + plainJson.length());
 
+        // Generate reference number
+        String requestReferNumber = generateReferenceNumber(inputSource);
+        System.out.println("Request Ref Number  : " + requestReferNumber);
 
-	
-    // last-2-digit rollover logic
-    private static String incrementMur(String mur) {
-        String prefix = mur.substring(0, mur.length() - 2);
-        String lastTwo = mur.substring(mur.length() - 2);
+        // AES-GCM encrypt
+        String encryptedData = utility.eis_encryptgcm(plainJson, aesKey);
 
-        int num = Integer.parseInt(lastTwo);
+        // Digital signature
+        String normalizedJson = plainJson.replaceAll("\r\n|\n", "");
+        String signature = utility.sign(normalizedJson, PRIVATE_KEY_PATH);
 
-        num = (num == 99) ? 1 : num + 1;
+        // Verify signature
+        boolean isVerified = utility.verifySignature(
+                normalizedJson.getBytes(), signature, NE_PUBLIC_KEY_PATH);
+        System.out.println("Signature Verified  : " + isVerified);
 
-        return prefix + String.format("%02d", num);
+        // Signature byte-length
+        byte[] decodedSig = Base64.getDecoder().decode(signature);
+        System.out.println("Signature Bytes     : " + decodedSig.length);
+        System.out.println("Signature Length    : " + signature.length());
+
+        // ---- Print final JSON body ----------------------------------------
+        System.out.println("\n============================================================");
+        System.out.println("                  FINAL ENCRYPTED REQUEST                   ");
+        System.out.println("============================================================");
+        System.out.println("{");
+        System.out.println("  \"REQUEST\"                  : \"" + encryptedData + "\",");
+        System.out.println("  \"REQUEST_REFERENCE_NUMBER\" : \"" + requestReferNumber + "\",");
+        System.out.println("  \"DIGI_SIGN\"                : \"" + signature + "\"");
+        System.out.println("}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Reference number generator  (kept identical to original logic)
+    // -----------------------------------------------------------------------
+    public static String generateReferenceNumber(String identifier) {
+        Date date = new Date();
+        SimpleDateFormat sdf = new SimpleDateFormat("YYDDDhhMMsss");
+        String strDate = sdf.format(date);
+        String beforeValue = "SBI" + identifier + strDate;
+        int additionalLength = 25 - beforeValue.length();
+        String randomDigits = createSeq(additionalLength).toUpperCase();
+        return beforeValue + randomDigits;
+    }
+
+    public static String createSeq(int keyLength) {
+        String DIGITS = "0123456789";
+        SecureRandom rnd = new SecureRandom();
+        StringBuilder sb = new StringBuilder(keyLength);
+        for (int i = 0; i < keyLength; i++) {
+            sb.append(DIGITS.charAt(rnd.nextInt(DIGITS.length())));
+        }
+        return sb.toString();
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper — prompt until non-empty input is given
+    // -----------------------------------------------------------------------
+    private static String promptRequired(Scanner scanner, String prompt) {
+        String value;
+        do {
+            System.out.print(prompt);
+            value = scanner.nextLine().trim();
+            if (value.isEmpty()) {
+                System.out.println("  [!] This field is required. Please enter a value.");
+            }
+        } while (value.isEmpty());
+        return value;
     }
 }
-
-
-
-Dear Sir,
-
-At first, the requirement was to create a translation service from MT to MX. We worked on R&D for around one month with two resources. Later, the requirement changed, and in the meeting it was decided that we would manage the translation service application from our side. However, this was only for support and management, and no proper KT (Knowledge Transfer) was given to us.
-
-After that, we did a lot of R&D to set up the Maven project because no project setup was available earlier. Then we deployed the WAR file on WebLogic. We also set up WebLogic 14, configured the database, took the app server, and created the managed server. At that time, we had no previous experience with WebLogic 14, and no support or guidance was provided to us. We managed everything from our side through R&D.
-
-Later, we did the same setup on the production server as part of production support. At that time, it was discussed that we would provide production support only for a few months. However, new CRs (Change Requests) were later assigned to us without any KT or documentation.
-
-Working on these CRs is very difficult because we do not have previous knowledge of the application, and every task requires a lot of R&D and time from our side.
-
-Regards,
-[Your Name]
-
-
-
-
-
-	
-		
-	
-    <!-- Bootstrap and jQuery -->
-    <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
-    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
-    <script src="app.js"></script>
-</body>
-</html>
+			
