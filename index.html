@@ -1,6 +1,30 @@
 
 
 
+public static File generateXmlForDownload(File inputFile) throws IOException {
+
+    Map<String, Map<String, List<String>>> branchData =
+            new LinkedHashMap<>();
+
+    String tag = extractTag(inputFile.getName());
+
+    readTagFile(inputFile, tag, branchData);
+
+    List<File> files = writeAllOutputFiles(branchData);
+
+    if(files.isEmpty()){
+        throw new RuntimeException("XML Generation Failed");
+    }
+
+    return files.get(0);
+
+}
+
+
+
+
+
+
 
 @Service
 public class PdfDownloadService {
