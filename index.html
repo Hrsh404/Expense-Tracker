@@ -1,182 +1,152 @@
 
-package com.tcs.sbi.main.utility;
 
-import java.security.SecureRandom;
-import java.text.SimpleDateFormat;
-import java.util.Base64;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Scanner;
 
-import org.apache.commons.lang3.RandomStringUtils;
-import com.google.gson.Gson;
 
-/**
- * EncryptionUtility
- * -----------------
- * Standalone encryption tool for EIS requests.
- * Takes user inputs via Scanner, encrypts the payload using AES-GCM,
- * signs it with a private key, and prints the final JSON request body.
- *
- * Package as: EncryptionUtility.jar
- * Run with : java -jar EncryptionUtility.jar
- */
-public class EncryptionUtility {
+@Service
+public class PdfDownloadService {
 
-    // -----------------------------------------------------------------------
-    // Key / Certificate paths — update these before building the JAR
-    // -----------------------------------------------------------------------
-    private static final String PUBLIC_CERT_PATH    = "E:\\APIFOLDER_STRUCUTRE\\Keys\\NE_Pub.cer";
-    private static final String PRIVATE_KEY_PATH    = "E:\\APIFOLDER_STRUCUTRE\\Keys\\NE_PrivateKey.key";
-    private static final String NE_PUBLIC_KEY_PATH  = "E:\\APIFOLDER_STRUCUTRE\\Keys\\Neeispublickey.pem";
+    @Autowired
+    private PdfRepository repository;
 
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
-    public static void main(String[] args) {
-        Scanner scanner = new Scanner(System.in);
+    @Autowired
+    private XmlGenerationService xmlGenerationService;
 
-        System.out.println("============================================================");
-        System.out.println("          EIS Encryption Utility — Request Builder          ");
-        System.out.println("============================================================");
+    @Autowired
+    private PdfGenerationService pdfGenerationService;
 
-        // ---- Collect inputs ------------------------------------------------
-        String inputSource = promptRequired(scanner, "Enter Input Source (e.g. NER)         : ");
-        String channelId   = promptRequired(scanner, "Enter Channel ID   (e.g. FE)          : ");
-        String alertCode   = promptRequired(scanner, "Enter Alert Code   (e.g. F1)          : ");
-        String tellerId    = promptRequired(scanner, "Enter Teller ID    (e.g. 123j67)      : ");
-        String branchCode  = promptRequired(scanner, "Enter Branch Code  (e.g. 1234)        : ");
-        String tranNum     = promptRequired(scanner, "Enter Tran Number  (e.g. 132456)      : ");
+    public void downloadPdf(String documentId,
+                            HttpServletResponse response)
+            throws Exception {
 
-        System.out.print("Enter Request Data (pipe-separated, blank for empty) : ");
-        String reqData = scanner.nextLine().trim();
+        PdfDocument document = repository
+                .findByDocumentId(documentId)
+                .orElseThrow(() ->
+                        new RuntimeException("Invalid Document Id"));
 
-        scanner.close();
+        String txtPath = document.getTxtPath();
 
-        System.out.println("\n------------------------------------------------------------");
-        System.out.println("Processing — please wait...");
-        System.out.println("------------------------------------------------------------\n");
+        response.setContentType("application/pdf");
+        response.setHeader(
+                "Content-Disposition",
+                "attachment; filename=Statement.pdf");
 
-        // ---- Generate AES key ----------------------------------------------
-        String aesKey = RandomStringUtils.randomAlphanumeric(32);
-        System.out.println("Generated AES Key : " + aesKey);
+        OutputStream outputStream = response.getOutputStream();
 
-        // ---- Build & encrypt request ---------------------------------------
-        try {
-            encryptAndPrint(aesKey, inputSource, channelId, alertCode,
-                            tellerId, branchCode, tranNum, reqData);
-        } catch (Exception e) {
-            System.err.println("[ERROR] Encryption failed: " + e.getMessage());
-            e.printStackTrace();
-        }
+        pdfGenerationService.generatePdf(
+                txtPath,
+                outputStream);
 
-        // ---- RSA-encrypt the AES key (Access Token) -----------------------
-        try {
-            String accessToken = utility.RSAEncrypt(aesKey, PUBLIC_CERT_PATH);
-            System.out.println("\nAccess Token (RSA-encrypted AES key) :");
-            System.out.println(accessToken);
-        } catch (Exception e) {
-            System.err.println("[ERROR] RSA encryption failed: " + e.getMessage());
-            e.printStackTrace();
-        }
+        outputStream.flush();
+
     }
 
-    // -----------------------------------------------------------------------
-    // Core encryption logic
-    // -----------------------------------------------------------------------
-    private static void encryptAndPrint(String aesKey,
-                                        String inputSource,
-                                        String channelId,
-                                        String alertCode,
-                                        String tellerId,
-                                        String branchCode,
-                                        String tranNum,
-                                        String reqData) throws Exception {
-
-        // Build request map
-        Map<String, Object> queryParams = new HashMap<>();
-        queryParams.put("channelId",  channelId);
-        queryParams.put("alertCode",  alertCode);
-        queryParams.put("tranNum",    tranNum);
-        queryParams.put("tellerId",   tellerId);
-        queryParams.put("branchCode", branchCode);
-        queryParams.put("data",       reqData);
-
-        Gson gson = new Gson();
-        String plainJson = gson.toJson(queryParams);
-
-        System.out.println("\nPlain Request JSON  : " + plainJson);
-        System.out.println("Payload Length      : " + plainJson.length());
-
-        // Generate reference number
-        String requestReferNumber = generateReferenceNumber(inputSource);
-        System.out.println("Request Ref Number  : " + requestReferNumber);
-
-        // AES-GCM encrypt
-        String encryptedData = utility.eis_encryptgcm(plainJson, aesKey);
-
-        // Digital signature
-        String normalizedJson = plainJson.replaceAll("\r\n|\n", "");
-        String signature = utility.sign(normalizedJson, PRIVATE_KEY_PATH);
-
-        // Verify signature
-        boolean isVerified = utility.verifySignature(
-                normalizedJson.getBytes(), signature, NE_PUBLIC_KEY_PATH);
-        System.out.println("Signature Verified  : " + isVerified);
-
-        // Signature byte-length
-        byte[] decodedSig = Base64.getDecoder().decode(signature);
-        System.out.println("Signature Bytes     : " + decodedSig.length);
-        System.out.println("Signature Length    : " + signature.length());
-
-        // ---- Print final JSON body ----------------------------------------
-        System.out.println("\n============================================================");
-        System.out.println("                  FINAL ENCRYPTED REQUEST                   ");
-        System.out.println("============================================================");
-        System.out.println("{");
-        System.out.println("  \"REQUEST\"                  : \"" + encryptedData + "\",");
-        System.out.println("  \"REQUEST_REFERENCE_NUMBER\" : \"" + requestReferNumber + "\",");
-        System.out.println("  \"DIGI_SIGN\"                : \"" + signature + "\"");
-        System.out.println("}");
-    }
-
-    // -----------------------------------------------------------------------
-    // Reference number generator  (kept identical to original logic)
-    // -----------------------------------------------------------------------
-    public static String generateReferenceNumber(String identifier) {
-        Date date = new Date();
-        SimpleDateFormat sdf = new SimpleDateFormat("YYDDDhhMMsss");
-        String strDate = sdf.format(date);
-        String beforeValue = "SBI" + identifier + strDate;
-        int additionalLength = 25 - beforeValue.length();
-        String randomDigits = createSeq(additionalLength).toUpperCase();
-        return beforeValue + randomDigits;
-    }
-
-    public static String createSeq(int keyLength) {
-        String DIGITS = "0123456789";
-        SecureRandom rnd = new SecureRandom();
-        StringBuilder sb = new StringBuilder(keyLength);
-        for (int i = 0; i < keyLength; i++) {
-            sb.append(DIGITS.charAt(rnd.nextInt(DIGITS.length())));
-        }
-        return sb.toString();
-    }
-
-    // -----------------------------------------------------------------------
-    // Helper — prompt until non-empty input is given
-    // -----------------------------------------------------------------------
-    private static String promptRequired(Scanner scanner, String prompt) {
-        String value;
-        do {
-            System.out.print(prompt);
-            value = scanner.nextLine().trim();
-            if (value.isEmpty()) {
-                System.out.println("  [!] This field is required. Please enter a value.");
-            }
-        } while (value.isEmpty());
-        return value;
-    }
 }
-			
+
+
+
+
+@Service
+public class PdfGenerationService {
+
+    @Autowired
+    private XmlGenerationService xmlGenerationService;
+
+    public void generatePdf(
+            String txtPath,
+            OutputStream outputStream)
+            throws Exception {
+
+        File xmlFile =
+                xmlGenerationService.generateXml(txtPath);
+
+        /*
+            Call pdf-generator.jar
+
+            Pass XML
+
+            Receive JasperPrint
+
+            Export to OutputStream
+
+        */
+
+    }
+
+}
+
+
+
+
+
+@Repository
+public interface PdfRepository
+        extends JpaRepository<PdfDocument, Long> {
+
+    Optional<PdfDocument> findByDocumentId(String documentId);
+
+}
+
+
+
+
+
+
+
+
+@Service
+public class XmlGenerationService {
+
+    public File generateXml(String txtPath) throws Exception {
+
+        /*
+         Call xml-generator.jar here
+
+         Returns generated XML File
+        */
+
+        return new File("sample.xml");
+
+    }
+
+}
+
+
+
+@RestController
+@RequestMapping("/api/pdf")
+public class PdfDownloadController {
+
+    @Autowired
+    private PdfDownloadService pdfDownloadService;
+
+    @GetMapping("/download/{documentId}")
+    public void downloadPdf(
+            @PathVariable String documentId,
+            HttpServletResponse response) throws Exception {
+
+        pdfDownloadService.downloadPdf(documentId, response);
+
+    }
+
+}
+
+
+
+
+
+		@Entity
+@Table(name = "PDF_DOCUMENT")
+public class PdfDocument {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String documentId;
+
+    private String txtPath;
+
+    private String status;
+
+    // getters/setters
+}
