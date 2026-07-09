@@ -1,6 +1,149 @@
 
 
 
+
+public static void generatePdfForDownload(Customer_data custData,
+                                          String[] custInfo,
+                                          OutputStream outputStream) throws Exception {
+
+    Calendar RunDte = Calendar.getInstance();
+    Date runDate = new Date();
+    String runAMPM = RunDte.get(Calendar.AM_PM) + "";
+    String runDay = RunDte.get(Calendar.DATE) + "";
+    String runMon = (RunDte.get(Calendar.MONTH) + 1) + "";
+    String runY = RunDte.get(Calendar.YEAR) + "";
+    String runMin = RunDte.get(Calendar.MINUTE) + "";
+    String runHr = runDate.getHours() + "";
+
+    if (runAMPM.equalsIgnoreCase("1")) {
+        runAMPM = "PM";
+    } else {
+        runAMPM = "AM";
+    }
+
+    if (runDay.length() == 1)
+        runDay = "0" + runDay;
+
+    if (runMon.length() == 1)
+        runMon = "0" + runMon;
+
+    if (runMin.length() == 1)
+        runMin = "0" + runMin;
+
+    if (runHr.length() == 1)
+        runHr = "0" + runHr;
+
+    String runDte = runDay + "/" + runMon + "/" + runY + " " + runHr + ":" + runMin + " " + runAMPM;
+
+    Map<String, Object> parameters = new HashMap<>();
+
+    int serialNo = 1;
+    ArrayList<CreditSummary> creditSummaryList = new ArrayList<>();
+
+    try {
+
+        String[] creditSummary = custData.getCREDIT_SUMMATION().split("\\|\\n");
+
+        for (String account : creditSummary) {
+
+            String[] data = account.split("\\|");
+
+            CreditSummary creditSumm = new CreditSummary();
+
+            creditSumm.setSrNo(String.valueOf(serialNo));
+            creditSumm.setAccountNo(data[0].trim());
+            creditSumm.setAccName(data[1].trim());
+            creditSumm.setCreditSummary(data[3].trim());
+            creditSumm.setPushPullModel(data[4].trim());
+            creditSumm.setCIF(data[5].trim());
+            creditSumm.setCIFOutstanding(data[6].trim());
+
+            creditSummaryList.add(creditSumm);
+
+            serialNo++;
+        }
+
+    } catch (Exception e) {
+        log.warn("No data found for Credit Summary");
+    }
+
+    JRBeanCollectionDataSource creditSummaryDataset =
+            new JRBeanCollectionDataSource(creditSummaryList);
+
+    parameters.put("CreditSummary", creditSummaryDataset);
+
+    JasperPrint jasperPrint = JasperFillManager.fillReport(
+            jr1,
+            parameters,
+            new JREmptyDataSource());
+
+    JRPdfExporter exporter = new JRPdfExporter() {
+
+        protected void setHyperlinkInfo(PdfChunk chunk,
+                                        JRPrintHyperlink link) {
+
+            if (link != null &&
+                    link.getHyperlinkTooltip() != null &&
+                    HyperlinkTypeEnum.LOCAL_ANCHOR.equals(link.getHyperlinkTypeValue())) {
+
+                com.lowagie.text.pdf.PdfWriter pdfWriter = null;
+
+                PdfFormField pushButton =
+                        PdfFormField.createPushButton(pdfWriter);
+
+                pushButton.setFieldName(
+                        String.format("tt%s", chunk.hashCode()));
+
+                Rectangle rect = new Rectangle(1, 0, 0, 0);
+
+                pushButton.setWidget(
+                        rect,
+                        PdfAnnotation.HIGHLIGHT_NONE);
+
+                pushButton.put(
+                        PdfName.TU,
+                        new PdfString(
+                                link.getHyperlinkTooltip(),
+                                PdfObject.TEXT_UNICODE));
+
+                ((Chunk) chunk).setAnnotation(pushButton);
+
+                if (link.getHyperlinkAnchor() != null) {
+                    pushButton.setAction(
+                            PdfAction.gotoLocalPage(
+                                    link.getHyperlinkAnchor(),
+                                    false));
+                }
+
+                return;
+            }
+
+            super.setHyperlinkInfo(chunk, link);
+        }
+
+    };
+
+    exporter.setParameter(
+            JRExporterParameter.JASPER_PRINT,
+            jasperPrint);
+
+    exporter.setParameter(
+            JRExporterParameter.OUTPUT_STREAM,
+            outputStream);
+
+    exporter.exportReport();
+
+    outputStream.flush();
+
+    log.info("PDF streamed successfully.");
+
+}
+
+
+
+
+
+
 public static File generateXmlForDownload(File inputFile) throws IOException {
 
     Map<String, Map<String, List<String>>> branchData =
