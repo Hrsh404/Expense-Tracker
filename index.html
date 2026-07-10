@@ -1,6 +1,48 @@
 
 
 
+@Service
+public class PdfGenerationService {
+
+    public void generatePdf(File xmlFile,
+                            HttpServletResponse response) throws Exception {
+
+        String xml = new String(
+                Files.readAllBytes(xmlFile.toPath()),
+                StandardCharsets.UTF_8);
+
+        Customer_data customerData = new Customer_data();
+
+        Unmarshaller unmarshaller =
+                JAXBContext.newInstance(Customer_data.class)
+                           .createUnmarshaller();
+
+        customerData = (Customer_data) BIDUtil.xmlTOjaxbObject(
+                xml,
+                customerData,
+                unmarshaller);
+
+        String[] custInfo = {
+                "Branch Name",
+                "1234"
+        };
+
+        response.setContentType("application/pdf");
+        response.setHeader(
+                "Content-Disposition",
+                "attachment; filename=CreditSummary.pdf");
+
+        BIDUtil.generatePdfForDownload(
+                customerData,
+                custInfo,
+                response.getOutputStream());
+    }
+}
+
+
+
+
+
 
 public static void generatePdfForDownload(Customer_data custData,
                                           String[] custInfo,
