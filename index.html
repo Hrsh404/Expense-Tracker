@@ -3,6 +3,13 @@
 
 
 
+echo '{"email_id":"","smsLang":"E","isd_code":"00091","emailBody":"Dear Customer, Thank you for the transaction done today at SBI 00437 branch. Plz share your experience on https://crh.sbi.bank.in/nps?CH=Branch&TD=250723&TT=051072&JNo=2111774. The feedback may be provided before 8 am tomorrow. No Personal Information would be captured. SBI","batchTandem":"1","mobile_no":"7697365304","errorCode":"","checker":"0043745","genTime":"17:25:16","journalNum":"002772734","OtherLang":"01","account_no":"00000030003795783","txndate":"25072023","txnStartTime":"2026-07-17 12:24:40.669","P20":"00437","smsText":"Dear Customer, Thank you for the transaction done today at SBI 00437 branch. Plz share your experience on https://crh.sbi.bank.in/nps?CH=Branch&TD=250723&TT=051072&JNo=2111774. The feedback may be provided before 8 am tomorrow. No Personal Information would be captured. SBI","P03":"250723","P49":"002772734","requestId":"2111774","genType":"ONL","txnstarttime":"17114112","customer_no":"00000085005149433","alertType":"S","alertCode":"CF","cbsTxnDetails":"25072023 17114112","txn_start_time":"2026-07-17 12:24:40.669","smsTemplate":"Dear Customer, Thank you for the transaction done today at SBI (P20) branch. Plz share your experience on https://crh.sbi.bank.in/nps?CH=Branch&TD={P03}&TT={P55}&JNo={P49}"}' | ./amqsput WHATSAPP.Q QMGR_NAME
+
+
+
+
+
+
 public Map<String, Object> getMQMap(MQQueueManager qm, MQQueue queue) throws Exception {
 
     MQGetMessageOptions gmo = new MQGetMessageOptions();
