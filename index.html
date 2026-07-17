@@ -2,6 +2,29 @@
 
 
 
+
+public Map<String, Object> getMQMap(MQQueueManager qm, MQQueue queue) throws Exception {
+
+    MQGetMessageOptions gmo = new MQGetMessageOptions();
+    gmo.options = MQC.MQGMO_SYNCPOINT
+            | MQC.MQGMO_WAIT
+            | MQC.MQOO_FAIL_IF_QUIESCING;
+    gmo.waitInterval = MQC.MQWI_UNLIMITED;
+
+    MQMessage message = new MQMessage();
+    queue.get(message, gmo);
+
+    String msg = message.readStringOfCharLength(message.getDataLength()).trim();
+
+    ObjectMapper mapper = new ObjectMapper();
+    Map<String, Object> dMap = mapper.readValue(msg, new TypeReference<Map<String, Object>>() {});
+
+    return dMap;
+}
+
+
+
+
 import java.awt.image.BufferedImage;
 import java.io.File;
 import javax.imageio.ImageIO;
