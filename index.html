@@ -1,4 +1,75 @@
+
+
+public class NE_WhatsAppRetryLauncher {
+
+    private static final Logger log = LoggerFactory.getLogger(NE_WhatsAppRetryLauncher.class);
+
+    private static int retryIntervalMinutes;
+    private static int retrySchedulerIntervalMinutes;
+
+    static {
+        try {
+            retryIntervalMinutes = Integer.parseInt(
+                    NePropertyFileReader.getPropertyKeyValue(
+                            NeConstants.NE_PROPERTY_FILENAME.toString(),
+                            "WHATSAPP_RETRY_INTERVAL_MINUTES"));
+
+            retrySchedulerIntervalMinutes = Integer.parseInt(
+                    NePropertyFileReader.getPropertyKeyValue(
+                            NeConstants.NE_PROPERTY_FILENAME.toString(),
+                            "WHATSAPP_RETRY_SCHEDULER_INTERVAL_MINUTES"));
+
+        } catch (Exception e) {
+            log.error("Failed to load WhatsApp retry properties", e);
+        }
+    }
+
+    public static void main(String[] args) {
+
+        log.info("NE WhatsApp Retry Launcher started");
+        log.info("Retry Interval Minutes: " + retryIntervalMinutes);
+        log.info("Scheduler Interval Minutes: " + retrySchedulerIntervalMinutes);
+
+        try {
+            // Configure DB connection pool — same as your existing launchers
+            ConnectionManager.configureConnPool();
+
+            // Create retry scheduler
+            WhatsAppRetryScheduler retryScheduler = new WhatsAppRetryScheduler(
+                    new WhatsAppCampaignDao(),
+                    retryIntervalMinutes);
+
+            // Start scheduler — runs every X minutes automatically
+            ScheduledExecutorService scheduler =
+                    Executors.newSingleThreadScheduledExecutor();
+
+            scheduler.scheduleAtFixedRate(
+                    retryScheduler,
+                    0,                              // start immediately
+                    retrySchedulerIntervalMinutes,  // repeat every X minutes
+                    TimeUnit.MINUTES);
+
+            log.info("WhatsApp Retry Scheduler running. "
+                    + "Checking every " + retrySchedulerIntervalMinutes + " mins");
+
+            // Keep main thread alive — scheduler runs in background thread
+            while (true) {
+                Thread.sleep(Long.MAX_VALUE);
+            }
+
+        } catch (Exception e) {
+            log.error("NE WhatsApp Retry Launcher error", e);
+        }
+    }
+}
+
+
+
+
+
+
 public class WhatsAppRetryScheduler implements Runnable {
+
 
 private static final Logger log = LoggerFactory.getLogger(WhatsAppRetryScheduler.class);  
 
