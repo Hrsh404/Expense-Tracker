@@ -1,4 +1,97 @@
+public class WhatsAppRetryScheduler implements Runnable {
 
+private static final Logger log = LoggerFactory.getLogger(WhatsAppRetryScheduler.class);  
+
+private final WhatsAppCampaignDao whatsAppCampaignDao;  
+private final int retryIntervalMinutes;  
+
+public WhatsAppRetryScheduler(WhatsAppCampaignDao whatsAppCampaignDao,  
+                               int retryIntervalMinutes) {  
+    this.whatsAppCampaignDao   = whatsAppCampaignDao;  
+    this.retryIntervalMinutes  = retryIntervalMinutes;  
+}  
+
+@Override  
+public void run() {  
+    log.info("WhatsApp retry scheduler triggered.");  
+    Connection conn = null;  
+
+    try {  
+        conn = ConnectionManager.getConnection();  
+
+        List<Map<String, Object>> retryRecords =  
+                whatsAppCampaignDao.fetchRetryRecords(conn);  
+
+        log.info("Records found for retry: " + retryRecords.size());  
+
+        for (Map<String, Object> record : retryRecords) {  
+
+            String cmpReqId  = (String) record.get("CMP_REQ_ID");  
+            String payload   = (String) record.get("PAYLOAD");  
+            int retryCount   = (int)    record.get("RETRY_COUNT");  
+            int maxRetry     = (int)    record.get("MAX_RETRY");  
+
+            try {  
+                log.info("Retrying EIS. cmpReqId=" + cmpReqId  
+                        + " attempt=" + (retryCount + 1));  
+
+                // Retry EIS call  
+                Map<String, Object> eisResMap =  
+                        Notification_Utility.postDataToWhatsApp(  
+                                payload,  
+                                NE_WhatsAppQLauncher.eisWhatsAppDns,  
+                                NE_WhatsAppQLauncher.eisWhatsAppUrl,  
+                                NE_WhatsAppQLauncher.inputSourceId);  
+
+                String responseCode = (String) eisResMap.get("responseCode");  
+
+                if ("0".equals(responseCode)) {  
+                    // Retry SUCCESS  
+                    whatsAppCampaignDao.markSuccess(conn, cmpReqId);  
+                    conn.commit();  
+                    log.info("Retry SUCCESS. cmpReqId=" + cmpReqId);  
+
+                } else {  
+                    // Still failing  
+                    handleFailure(conn, cmpReqId, retryCount, maxRetry,  
+                            "EIS returned responseCode=1");  
+                }  
+
+            } catch (Exception e) {  
+                log.error("Retry exception. cmpReqId=" + cmpReqId, e);  
+                handleFailure(conn, cmpReqId, retryCount, maxRetry, e.getMessage());  
+            }  
+        }  
+
+    } catch (Exception e) {  
+        log.error("WhatsApp retry scheduler error.", e);  
+    } finally {  
+        ConnectionManager.closeConnection(conn);  
+    }  
+}  
+
+private void handleFailure(Connection conn, String cmpReqId,  
+                            int retryCount, int maxRetry,  
+                            String errorDetail) {  
+    try {  
+        if ((retryCount + 1) >= maxRetry) {  
+            // Max retries exhausted — move to DLQ  
+            whatsAppCampaignDao.markDlq(conn, cmpReqId, errorDetail);  
+            conn.commit();  
+            log.warn("Max retries exhausted. Moved to DLQ. cmpReqId=" + cmpReqId);  
+        } else {  
+            // Retry again later  
+            whatsAppCampaignDao.markFailed(conn, cmpReqId,  
+                    errorDetail, retryIntervalMinutes);  
+            conn.commit();  
+            log.warn("Retry failed. Will retry again later. cmpReqId=" + cmpReqId);  
+        }  
+    } catch (Exception e) {  
+        log.error("handleFailure DB update error. cmpReqId=" + cmpReqId, e);  
+    }  
+}
+
+}
 
 
 
