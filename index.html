@@ -1,5 +1,180 @@
 
 
+public static Map<String, Object> postDataToWhatsApp(Map<String, Object> datamap,
+                                                      String apiUrl,
+                                                      String urlPath,
+                                                      String inputSource) {
+    Map<String, Object> apiRespMap = new HashMap();
+    String eisUrl = apiUrl + urlPath;
+
+    // Generate your own reference number — this is ORIGINAL_RRN
+    String requestReferNumber = generateReferenceNumber(inputSource);
+
+    try {
+        // Step 1 — Save to DB as PENDING before calling EIS
+        WhatsAppManager.insertIntoWhatsAppWorkflow(datamap, requestReferNumber);
+        whatsApplogger.info(datamap.get("mobilerequestId")
+                + " : Inserted into workflow. ORIGINAL_RRN=" + requestReferNumber);
+
+        // Step 2 — Prepare encrypted request
+        String key = RandomStringUtils.randomAlphanumeric(32);
+        String encryptedData = prepareEncryptedEisJsonReqforWhatsApp(
+                datamap, key, inputSource, requestReferNumber);
+
+        whatsApplogger.info(datamap.get("mobilerequestId")
+                + " : Request to EIS : " + encryptedData);
+        whatsApplogger.info(" AES Key :" + key + "   ||  EIS URL :" + eisUrl);
+
+        // Step 3 — Call EIS API
+        apiRespMap = ApiClientWhatsApp.callEISApi(encryptedData, eisUrl, key);
+        whatsApplogger.info("API RESPONSE MAP : " + apiRespMap);
+
+        // Step 4 — Parse EIS response
+        Map<String, Object> eisResponse = (Map<String, Object>) apiRespMap.get("EIS_RESPONSE");
+        String statusCode            = (String) eisResponse.get("STATUS_CODE");
+        String whatsAppErrorDesc     = (String) eisResponse.get("DESCRIPTION");
+
+        whatsApplogger.info(datamap.get("mobilerequestId")
+                + " : STATUS_CODE=" + statusCode);
+
+        // Step 5 — Check response and update DB
+        if ("00".equals(statusCode)) {
+            // SUCCESS
+            WhatsAppManager.updateSuccessFlagWhatsAppWorkflow(requestReferNumber);
+
+            // Audit — attempt 1 success
+            WhatsAppManager.insertAuditWhatsAppWorkflow(
+                    requestReferNumber, requestReferNumber,
+                    1, "V", null);
+
+            whatsApplogger.info(datamap.get("mobilerequestId")
+                    + " : EIS SUCCESS. ORIGINAL_RRN=" + requestReferNumber);
+
+        } else {
+            // FAILED — generate new REQUEST_ID for next retry
+            String newRequestId = generateReferenceNumber(inputSource);
+
+            WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                    requestReferNumber, newRequestId,
+                    whatsAppErrorDesc, retryIntervalMinutes);
+
+            // Audit — attempt 1 failed
+            WhatsAppManager.insertAuditWhatsAppWorkflow(
+                    requestReferNumber, requestReferNumber,
+                    1, "F", whatsAppErrorDesc);
+
+            whatsApplogger.info(datamap.get("mobilerequestId")
+                    + " : EIS FAILED. ORIGINAL_RRN=" + requestReferNumber
+                    + " newRequestId=" + newRequestId);
+        }
+
+    } catch (Exception e) {
+        whatsApplogger.error(datamap.get("mobilerequestId")
+                + " : Exception while API call : " + e.getMessage());
+
+        // Generate new REQUEST_ID for next retry
+        String newRequestId = generateReferenceNumber(inputSource);
+
+        WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                requestReferNumber, newRequestId,
+                e.getMessage(), retryIntervalMinutes);
+
+        // Audit — attempt 1 exception
+        WhatsAppManager.insertAuditWhatsAppWorkflow(
+                requestReferNumber, requestReferNumber,
+                1, "F", e.getMessage());
+
+        apiRespMap.put("RESPONSE_STATUS", NeConstants.EIS_FAIL.toString());
+        apiRespMap.put("ERROR_CODE", "9999");
+        apiRespMap.put("ERROR_DESCRIPTION", "UNABLE TO PROCESS THE REQUEST");
+    }
+
+    return apiRespMap;
+}
+
+
+
+
+
+
+
+			public static String prepareEncryptedEisJsonReqforWhatsApp(Map<String, Object> mapdata,
+                                                            String aesKey,
+                                                            String inputSource,
+                                                            String requestReferNumber) {
+    String encJsonReq;
+    try {
+
+        // requestReferNumber passed in — no longer generated here
+        // insertIntoWhatsAppWorkflow removed from here — done in postDataToWhatsApp
+
+        Map<String, Object> queryParams = new HashMap();
+        Map<String, Object> payload = new HashMap();
+        Map<String, String> templateParams = new LinkedHashMap<>();
+
+        // Dynamic template params from property file
+        String paramKeyStr = NePropertyFileReader.getPropertyKeyValue(
+                NeConstants.NE_PROPERTY_FILENAME.toString(),
+                "WHATS_APP_TEMPLATE_PARAMS_" + mapdata.get("alertCode"));
+
+        if (paramKeyStr != null && !paramKeyStr.isEmpty()) {
+            String[] paramKeys = paramKeyStr.split(",");
+            for (int i = 0; i < paramKeys.length; i++) {
+                String pKey   = paramKeys[i].trim();
+                String varKey = "var" + (i + 1);
+                templateParams.put(varKey, (String) mapdata.get(pKey));
+            }
+        }
+
+        // Build payload
+        payload.put(NeConstants.SOURCEIDWHATSAPP.toString(), NE_WhatsAppQLauncher.whatsappSoruceId);
+        payload.put(NeConstants.DATE.toString(), mapdata.get("txn_date"));
+        payload.put(NeConstants.CAMPAIGNCATEGORY.toString(), NE_WhatsAppQLauncher.campaignCategory);
+        payload.put(NeConstants.MOBILE_NUMBER.toString(),
+                (String) mapdata.get("isd_code") + (String) mapdata.get("mobile_no"));
+        payload.put(NeConstants.TEMPLATE_ID.toString(), NE_WhatsAppQLauncher.templateId);
+        payload.put(NeConstants.CONTENT_TYPE.toString(), NE_WhatsAppQLauncher.contentType);
+        payload.put(NeConstants.CAMPAIGN_NAME.toString(), NE_WhatsAppQLauncher.campaignName);
+        payload.put(NeConstants.TEMPLATE_PARAMS.toString(), templateParams);
+
+        // Build queryParams
+        queryParams.put(NeConstants.SOURCE_ID.toString(), inputSource);
+        queryParams.put(NeConstants.DESTINATION.toString(), NE_WhatsAppQLauncher.whatsappDestination);
+        queryParams.put(NeConstants.TXN_TYPE.toString(), NE_WhatsAppQLauncher.whatsappTxnType);
+        queryParams.put(NeConstants.TXN_SUB_TYPE.toString(), NE_WhatsAppQLauncher.whatsaAppTxnSubType);
+        queryParams.put(NeConstants.EIS_PAYLOAD.toString(), payload);
+
+        whatsApplogger.info(mapdata.get("mobilerequestId")
+                + " : Request to EIS : " + payload);
+
+        Gson gson = new Gson();
+        whatsApplogger.info("Final Request Body Map: " + gson.toJson(queryParams));
+
+        // Encrypt
+        String encryptedData = AESdecrypt.eis_encrypt(gson.toJson(queryParams), aesKey);
+
+        // Build EIS request bean
+        EISRequestBean eisRequestBean = new EISRequestBean();
+        eisRequestBean.setREQUEST(encryptedData);
+        eisRequestBean.setREQUEST_REFERENCE_NUMBER(requestReferNumber);
+
+        String signature = AESdecrypt.signing(gson.toJson(queryParams))
+                .replaceAll("\r\n|\n", "");
+        eisRequestBean.setDIGI_SIGN(signature);
+
+        encJsonReq = gson.toJson(eisRequestBean);
+        return encJsonReq;
+
+    } catch (Exception e) {
+        whatsApplogger.error(mapdata.get("mobilerequestId")
+                + " : Exception while generating EIS request : " + e.getMessage());
+        return NeConstants.EMAIL_FAIL.toString();
+    }
+}
+
+
+
+
 package com.tcs.cbslite.notification.db;
 
 import java.sql.Clob;
