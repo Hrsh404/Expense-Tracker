@@ -1,5 +1,315 @@
 
 
+package com.tcs.cbslite.notification.db;
+
+import java.sql.Clob;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import com.google.gson.Gson;
+import com.tcs.cbslite.notifications.launcher.NE_WhatsAppQLauncher;
+
+public class WhatsAppManager {
+
+    private static final Logger log = LogManager.getLogger(NE_WhatsAppQLauncher.class);
+
+    // ─────────────────────────────────────────
+    // STATUS CONSTANTS
+    // P = PENDING
+    // V = SUCCESS (V for Validated — your existing convention)
+    // F = FAILED
+    // D = DLQ
+    // ─────────────────────────────────────────
+    private static final String STATUS_PENDING = "P";
+    private static final String STATUS_SUCCESS = "V";
+    private static final String STATUS_FAILED  = "F";
+    private static final String STATUS_DLQ     = "D";
+
+    // ─────────────────────────────────────────
+    // WHATSAPP_WORKFLOW queries
+    // ─────────────────────────────────────────
+    private static final String INSERT_WORKFLOW =
+            "INSERT INTO WHATSAPP_WORKFLOW " +
+            "(ID, REQUEST_ID, ORIGINAL_RRN, ALERT_CODE, PAYLOAD, STATUS) " +
+            "VALUES (WHATSAPP_WORKFLOW_SEQ.NEXTVAL, ?, ?, ?, ?, ?)";
+
+    private static final String UPDATE_SUCCESS =
+            "UPDATE WHATSAPP_WORKFLOW " +
+            "SET STATUS = ?, " +
+            "    LAST_UPDATED_AT = SYSTIMESTAMP " +
+            "WHERE ORIGINAL_RRN = ?";
+
+    private static final String UPDATE_FAILED =
+            "UPDATE WHATSAPP_WORKFLOW " +
+            "SET REQUEST_ID      = ?, " +   // new REQUEST_ID for next EIS call
+            "    STATUS          = ?, " +
+            "    RETRY_COUNT     = RETRY_COUNT + 1, " +
+            "    ERROR_DETAIL    = ?, " +
+            "    NEXT_RETRY_AT   = SYSTIMESTAMP + ? / (24 * 60), " +
+            "    LAST_UPDATED_AT = SYSTIMESTAMP " +
+            "WHERE ORIGINAL_RRN = ?";
+
+    private static final String UPDATE_DLQ =
+            "UPDATE WHATSAPP_WORKFLOW " +
+            "SET STATUS          = ?, " +
+            "    ERROR_DETAIL    = ?, " +
+            "    LAST_UPDATED_AT = SYSTIMESTAMP " +
+            "WHERE ORIGINAL_RRN = ?";
+
+    private static final String FETCH_RETRY_RECORDS =
+            "SELECT REQUEST_ID, ORIGINAL_RRN, ALERT_CODE, PAYLOAD, " +
+            "       RETRY_COUNT, MAX_RETRY " +
+            "FROM WHATSAPP_WORKFLOW " +
+            "WHERE STATUS = ? " +
+            "AND RETRY_COUNT < MAX_RETRY " +
+            "AND NEXT_RETRY_AT <= SYSTIMESTAMP " +
+            "ORDER BY CREATED_AT ASC";
+
+    // ─────────────────────────────────────────
+    // WHATSAPP_WORKFLOW_AUDIT queries
+    // ─────────────────────────────────────────
+    private static final String INSERT_AUDIT =
+            "INSERT INTO WHATSAPP_WORKFLOW_AUDIT " +
+            "(ID, ORIGINAL_RRN, REQUEST_ID, ATTEMPT_NUMBER, STATUS, ERROR_DETAIL) " +
+            "VALUES (WHATSAPP_WORKFLOW_AUDIT_SEQ.NEXTVAL, ?, ?, ?, ?, ?)";
+
+
+    // ─────────────────────────────────────────
+    // INSERT — called before EIS call
+    // ─────────────────────────────────────────
+    public static void insertIntoWhatsAppWorkflow(Map<String, Object> datamap,
+                                                   String requestReferenceNumber) {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+
+        try {
+            Gson gson = new Gson();
+            conn = ConnectionManager.getConnection();
+
+            String json = gson.toJson(datamap);
+            Clob clob = conn.createClob();
+            clob.setString(1, json);
+
+            pstmt = conn.prepareStatement(INSERT_WORKFLOW);
+            pstmt.setString(1, requestReferenceNumber);  // REQUEST_ID
+            pstmt.setString(2, requestReferenceNumber);  // ORIGINAL_RRN — never changes
+            pstmt.setObject(3, datamap.get("alertCode"));
+            pstmt.setClob(4, clob);
+            pstmt.setObject(5, STATUS_PENDING);
+            pstmt.executeUpdate();
+
+            conn.commit();
+
+            log.info(requestReferenceNumber + " : WhatsApp workflow inserted.");
+
+        } catch (Exception e) {
+            log.error(requestReferenceNumber
+                    + " : insertIntoWhatsAppWorkflow failed : " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            closeResources(pstmt, null, conn);
+        }
+    }
+
+
+    // ─────────────────────────────────────────
+    // UPDATE SUCCESS — called when EIS returns 0
+    // ─────────────────────────────────────────
+    public static void updateSuccessFlagWhatsAppWorkflow(String originalRrn) {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+
+        try {
+            conn = ConnectionManager.getConnection();
+            pstmt = conn.prepareStatement(UPDATE_SUCCESS);
+            pstmt.setObject(1, STATUS_SUCCESS);
+            pstmt.setObject(2, originalRrn);
+            pstmt.executeUpdate();
+
+            conn.commit();
+
+            log.info(originalRrn + " : WhatsApp workflow marked SUCCESS.");
+
+        } catch (SQLException sqe) {
+            log.error(originalRrn
+                    + " : updateSuccessFlagWhatsAppWorkflow failed : " + sqe.getMessage());
+        } finally {
+            closeResources(pstmt, null, conn);
+        }
+    }
+
+
+    // ─────────────────────────────────────────
+    // UPDATE FAILED — called when EIS returns 1 or exception
+    // Updates same row with new REQUEST_ID for next retry
+    // ─────────────────────────────────────────
+    public static void updateFailFlagWhatsAppWorkflow(String originalRrn,
+                                                       String newRequestId,
+                                                       String errorDetail,
+                                                       int retryIntervalMinutes) {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+
+        try {
+            conn = ConnectionManager.getConnection();
+            pstmt = conn.prepareStatement(UPDATE_FAILED);
+            pstmt.setString(1, newRequestId);       // new REQUEST_ID for next EIS call
+            pstmt.setObject(2, STATUS_FAILED);
+            pstmt.setObject(3, errorDetail);
+            pstmt.setInt(4, retryIntervalMinutes);
+            pstmt.setObject(5, originalRrn);
+            pstmt.executeUpdate();
+
+            conn.commit();
+
+            log.info(originalRrn + " : WhatsApp workflow marked FAILED."
+                    + " newRequestId=" + newRequestId);
+
+        } catch (SQLException sqe) {
+            log.error(originalRrn
+                    + " : updateFailFlagWhatsAppWorkflow failed : " + sqe.getMessage());
+        } finally {
+            closeResources(pstmt, null, conn);
+        }
+    }
+
+
+    // ─────────────────────────────────────────
+    // UPDATE DLQ — called when max retries exhausted
+    // ─────────────────────────────────────────
+    public static void updateDlqFlagWhatsAppWorkflow(String originalRrn,
+                                                      String errorDetail) {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+
+        try {
+            conn = ConnectionManager.getConnection();
+            pstmt = conn.prepareStatement(UPDATE_DLQ);
+            pstmt.setObject(1, STATUS_DLQ);
+            pstmt.setObject(2, errorDetail);
+            pstmt.setObject(3, originalRrn);
+            pstmt.executeUpdate();
+
+            conn.commit();
+
+            log.warn(originalRrn + " : WhatsApp workflow moved to DLQ.");
+
+        } catch (SQLException sqe) {
+            log.error(originalRrn
+                    + " : updateDlqFlagWhatsAppWorkflow failed : " + sqe.getMessage());
+        } finally {
+            closeResources(pstmt, null, conn);
+        }
+    }
+
+
+    // ─────────────────────────────────────────
+    // FETCH RETRY RECORDS — called by scheduler
+    // ─────────────────────────────────────────
+    public static List<Map<String, Object>> fetchRetryRecordsWhatsAppWorkflow() {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+        ResultSet rSet = null;
+
+        try {
+            conn = ConnectionManager.getConnection();
+            pstmt = conn.prepareStatement(FETCH_RETRY_RECORDS);
+            pstmt.setObject(1, STATUS_FAILED);
+            rSet = pstmt.executeQuery();
+
+            List<Map<String, Object>> records = new ArrayList<>();
+
+            while (rSet.next()) {
+                Map<String, Object> row = new HashMap<>();
+                row.put("REQUEST_ID",   rSet.getString("REQUEST_ID"));
+                row.put("ORIGINAL_RRN", rSet.getString("ORIGINAL_RRN"));
+                row.put("ALERT_CODE",   rSet.getString("ALERT_CODE"));
+                row.put("PAYLOAD",      rSet.getString("PAYLOAD"));
+                row.put("RETRY_COUNT",  rSet.getInt("RETRY_COUNT"));
+                row.put("MAX_RETRY",    rSet.getInt("MAX_RETRY"));
+                records.add(row);
+            }
+
+            log.info("Fetched " + records.size() + " FAILED records for retry.");
+            return records;
+
+        } catch (Exception e) {
+            log.error("fetchRetryRecordsWhatsAppWorkflow failed : " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            closeResources(pstmt, rSet, conn);
+        }
+
+        return new ArrayList<>(); // return empty list — never null
+    }
+
+
+    // ─────────────────────────────────────────
+    // INSERT AUDIT — called after every EIS attempt
+    // ─────────────────────────────────────────
+    public static void insertAuditWhatsAppWorkflow(String originalRrn,
+                                                    String requestId,
+                                                    int attemptNumber,
+                                                    String status,
+                                                    String errorDetail) {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+
+        try {
+            conn = ConnectionManager.getConnection();
+            pstmt = conn.prepareStatement(INSERT_AUDIT);
+            pstmt.setString(1, originalRrn);
+            pstmt.setString(2, requestId);
+            pstmt.setInt(3, attemptNumber);
+            pstmt.setString(4, status);
+            pstmt.setString(5, errorDetail);
+            pstmt.executeUpdate();
+
+            conn.commit();
+
+            log.info(originalRrn + " : Audit inserted."
+                    + " requestId=" + requestId
+                    + " attempt=" + attemptNumber
+                    + " status=" + status);
+
+        } catch (SQLException sqe) {
+            log.error(originalRrn
+                    + " : insertAuditWhatsAppWorkflow failed : " + sqe.getMessage());
+        } finally {
+            closeResources(pstmt, null, conn);
+        }
+    }
+
+
+    // ─────────────────────────────────────────
+    // CLOSE RESOURCES — always close in finally
+    // ─────────────────────────────────────────
+    private static void closeResources(PreparedStatement pstmt,
+                                        ResultSet rSet,
+                                        Connection conn) {
+        try {
+            if (rSet  != null) rSet.close();
+            if (pstmt != null) pstmt.close();
+            if (conn  != null) ConnectionManager.closeConnection(conn);
+        } catch (SQLException e) {
+            log.error("closeResources failed : " + e.getMessage());
+        }
+    }
+}
+
+
+
+
+
 public class NE_WhatsAppRetryLauncher {
 
     private static final Logger log = LoggerFactory.getLogger(NE_WhatsAppRetryLauncher.class);
