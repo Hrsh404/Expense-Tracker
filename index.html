@@ -1,106 +1,16 @@
-@Override
-public void run() {
-    log.info("WhatsApp retry scheduler triggered.");
-
-    try {
-        List<Map<String, Object>> retryRecords =
-                WhatsAppManager.fetchRetryRecordsWhatsAppWorkflow();
-
-        log.info("Records found for retry: " + retryRecords.size());
-
-        for (Map<String, Object> record : retryRecords) {
-
-            String originalRrn = (String) record.get("ORIGINAL_RRN");
-            String payload     = (String) record.get("PAYLOAD");
-            int retryCount     = (int)    record.get("RETRY_COUNT");
-            int maxRetry       = (int)    record.get("MAX_RETRY");
-            int attemptNumber  = retryCount + 1;
-
-            // New REQUEST_ID for this retry — EIS expects new one
-            String newRequestId = Notification_Utility.generateReferenceNumber(
-                    NE_WhatsAppQLauncher.inputSourceId);
-
-            try {
-                log.info("Retrying EIS. originalRrn=" + originalRrn
-                        + " newRequestId=" + newRequestId
-                        + " attempt=" + attemptNumber);
-
-                // Rebuild datamap from stored payload
-                Gson gson = new Gson();
-                Map<String, Object> datamap = gson.fromJson(payload, Map.class);
-
-                // Call EIS with new requestId
-                String key = RandomStringUtils.randomAlphanumeric(32);
-                String encryptedData = Notification_Utility
-                        .prepareEncryptedEisJsonReqforWhatsApp(
-                                datamap, key,
-                                NE_WhatsAppQLauncher.inputSourceId,
-                                newRequestId);  // pass new requestId
-
-                String eisUrl = NE_WhatsAppQLauncher.eisWhatsAppDns
-                        + NE_WhatsAppQLauncher.eisWhatsAppUrl;
-
-                Map<String, Object> apiRespMap =
-                        ApiClientWhatsApp.callEISApi(encryptedData, eisUrl, key);
-
-                Map<String, Object> eisResponse =
-                        (Map<String, Object>) apiRespMap.get("EIS_RESPONSE");
-                String statusCode        = (String) eisResponse.get("STATUS_CODE");
-                String errorDescription  = (String) eisResponse.get("DESCRIPTION");
-
-                if ("00".equals(statusCode)) {
-                    // SUCCESS
-                    WhatsAppManager.updateSuccessFlagWhatsAppWorkflow(originalRrn);
-
-                    WhatsAppManager.insertAuditWhatsAppWorkflow(
-                            originalRrn, newRequestId,
-                            attemptNumber, "V", null);
-
-                    log.info("Retry SUCCESS. originalRrn=" + originalRrn);
-
-                } else {
-                    // Still failing
-                    handleFailure(originalRrn, newRequestId,
-                            attemptNumber, retryCount, maxRetry, errorDescription);
-                }
-
-            } catch (Exception e) {
-                log.error("Retry exception. originalRrn=" + originalRrn, e);
-                handleFailure(originalRrn, newRequestId,
-                        attemptNumber, retryCount, maxRetry, e.getMessage());
-            }
-        }
-
-    } catch (Exception e) {
-        log.error("WhatsApp retry scheduler error.", e);
-    }
-}
-
-private void handleFailure(String originalRrn, String currentRequestId,
-                            int attemptNumber, int retryCount,
-                            int maxRetry, String errorDetail) {
-    try {
-        // Audit this attempt
-        WhatsAppManager.insertAuditWhatsAppWorkflow(
-                originalRrn, currentRequestId,
-                attemptNumber, "F", errorDetail);
-
-        if ((retryCount + 1) >= maxRetry) {
-            // Max retries exhausted — DLQ
-            WhatsAppManager.updateDlqFlagWhatsAppWorkflow(originalRrn, errorDetail);
-            log.warn("Max retries exhausted. DLQ. originalRrn=" + originalRrn);
-        } else {
-            // Generate next REQUEST_ID for next retry
-            String nextRequestId = Notification_Utility.generateReferenceNumber(
-                    NE_WhatsAppQLauncher.inputSourceId);
-
-            WhatsAppManager.updateFailFlagWhatsAppWorkflow(
-                    originalRrn, nextRequestId,
-                    errorDetail, retryIntervalMinutes);
-
-            log.warn("Retry failed. Will retry again. originalRrn=" + originalRrn);
-        }
-    } catch (Exception e) {
-        log.error("handleFailure error. originalRrn=" + originalRrn, e);
-    }
-}
+SELECT
+    r.REQUEST_ID,
+    r.MUR_CODE AS REQUEST_MUR_CODE,
+    r.SOURCE_SYSTEM,
+    r.MESSAGE_FORMAT,
+    r.CREATION_TIME,
+    c.RESPONSE_ID,
+    c.MUR_CODE AS RESPONSE_MUR_CODE,
+    c.RESPONSE_TIME,
+    c.RESPONSE_CODE,
+    c.RESPONSE_STATUS
+FROM ANC_SWIFT_REQUEST r
+FULL OUTER JOIN ANC_SWIFT_CSIG_RESPONSE c
+    ON r.MUR_CODE = c.MUR_CODE
+WHERE TRUNC(c.RESPONSE_TIME) = TRUNC(SYSDATE)
+ORDER BY c.RESPONSE_TIME DESC;
