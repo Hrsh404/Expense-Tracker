@@ -1,28 +1,152 @@
-SELECT
-    r.REQUEST_ID,
-    r.MUR_CODE AS REQUEST_MUR_CODE,
-    r.SOURCE_SYSTEM,
-    r.MESSAGE_FORMAT,
-    r.CREATION_TIME,
-    c.RESPONSE_ID,
-    c.MUR_CODE AS RESPONSE_MUR_CODE,
-    c.RESPONSE_TIME,
-    c.RESPONSE_CODE,
-    c.RESPONSE_STATUS
-FROM ANC_SWIFT_REQUEST r
-FULL OUTER JOIN ANC_SWIFT_CSIG_RESPONSE c
-    ON r.MUR_CODE = c.MUR_CODE
-WHERE TRUNC(c.RESPONSE_TIME) = TRUNC(SYSDATE)
-ORDER BY c.RESPONSE_TIME DESC;
+public static Map<String, Object> postDataToWhatsApp(Map<String, Object> datamap,
+                                                      String apiUrl,
+                                                      String urlPath,
+                                                      String inputSource) {
+    Map<String, Object> apiRespMap = new HashMap();
+    String eisUrl = apiUrl + urlPath;
+    String requestReferNumber = generateReferenceNumber(inputSource);
 
+    try {
+        // Step 1 — Save to DB as PENDING
+        WhatsAppManager.insertIntoWhatsAppWorkflow(datamap, requestReferNumber);
 
-SELECT
-    CASE
-        WHEN RESPONSE_CODE = 0 THEN 'SUCCESS'
-        WHEN RESPONSE_CODE = 1 THEN 'FAILURE'
-        ELSE 'UNKNOWN'
-    END AS STATUS,
-    COUNT(*) AS TOTAL_COUNT
-FROM ANC_SWIFT_CSIG_RESPONSE
-GROUP BY RESPONSE_CODE
-ORDER BY RESPONSE_CODE;
+        // Step 2 — Prepare and call EIS
+        String key = RandomStringUtils.randomAlphanumeric(32);
+        String encryptedData = prepareEncryptedEisJsonReqforWhatsApp(
+                datamap, key, inputSource, requestReferNumber);
+
+        whatsApplogger.info(datamap.get("mobilerequestId")
+                + " : Calling EIS. ORIGINAL_RRN=" + requestReferNumber);
+
+        apiRespMap = ApiClientWhatsApp.callEISApi(encryptedData, eisUrl, key);
+        whatsApplogger.info("Full API Response: " + apiRespMap);
+
+        // ─────────────────────────────────────
+        // Step 3 — Check EIS level error first
+        // ─────────────────────────────────────
+        String eisErrorCode = (String) apiRespMap.get("ERROR_CODE");
+
+        if (eisErrorCode != null && !eisErrorCode.isEmpty()) {
+            // EIS level error received
+            String eisErrorDesc = (String) apiRespMap.get("ERROR_DESCRIPTION");
+
+            whatsApplogger.warn(datamap.get("mobilerequestId")
+                    + " : EIS level error. ERROR_CODE=" + eisErrorCode
+                    + " DESC=" + eisErrorDesc);
+
+            if (isRetryableEisErrorCode(eisErrorCode)) {
+                // Retryable EIS error — mark FAILED
+                String newRequestId = generateReferenceNumber(inputSource);
+
+                WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                        requestReferNumber, newRequestId,
+                        "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc,
+                        retryIntervalMinutes);
+
+                WhatsAppManager.insertAuditWhatsAppWorkflow(
+                        requestReferNumber, requestReferNumber, 1,
+                        "F", "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+
+                whatsApplogger.warn(datamap.get("mobilerequestId")
+                        + " : EIS error is retryable. Will retry. ORIGINAL_RRN="
+                        + requestReferNumber);
+
+            } else {
+                // Non-retryable EIS error — DLQ directly
+                WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                        requestReferNumber,
+                        "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+
+                WhatsAppManager.insertAuditWhatsAppWorkflow(
+                        requestReferNumber, requestReferNumber, 1,
+                        "D", "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+
+                whatsApplogger.warn(datamap.get("mobilerequestId")
+                        + " : EIS error is non-retryable. Moving to DLQ."
+                        + " ERROR_CODE=" + eisErrorCode);
+            }
+
+            return apiRespMap; // stop here — no point checking WhatsApp response
+        }
+
+        // ─────────────────────────────────────
+        // Step 4 — Check WhatsApp level response
+        // ─────────────────────────────────────
+        Map<String, Object> eisResponse =
+                (Map<String, Object>) apiRespMap.get("EIS_RESPONSE");
+
+        String statusCode       = (String) eisResponse.get("STATUS_CODE");
+        String errorDescription = (String) eisResponse.get("DESCRIPTION");
+
+        whatsApplogger.info(datamap.get("mobilerequestId")
+                + " : WhatsApp STATUS_CODE=" + statusCode);
+
+        if ("00".equals(statusCode)) {
+            // WhatsApp SUCCESS
+            WhatsAppManager.updateSuccessFlagWhatsAppWorkflow(requestReferNumber);
+
+            WhatsAppManager.insertAuditWhatsAppWorkflow(
+                    requestReferNumber, requestReferNumber,
+                    1, "V", null);
+
+            whatsApplogger.info(datamap.get("mobilerequestId")
+                    + " : WhatsApp SUCCESS. ORIGINAL_RRN=" + requestReferNumber);
+
+        } else {
+            // WhatsApp level error
+            whatsApplogger.warn(datamap.get("mobilerequestId")
+                    + " : WhatsApp level error. STATUS_CODE=" + statusCode
+                    + " DESC=" + errorDescription);
+
+            if (isRetryableWhatsAppStatusCode(statusCode)) {
+                // Retryable WhatsApp error — mark FAILED
+                String newRequestId = generateReferenceNumber(inputSource);
+
+                WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                        requestReferNumber, newRequestId,
+                        "WA_ERR | " + statusCode + " | " + errorDescription,
+                        retryIntervalMinutes);
+
+                WhatsAppManager.insertAuditWhatsAppWorkflow(
+                        requestReferNumber, requestReferNumber, 1,
+                        "F", "WA_ERR | " + statusCode + " | " + errorDescription);
+
+                whatsApplogger.warn(datamap.get("mobilerequestId")
+                        + " : WhatsApp error is retryable. Will retry. ORIGINAL_RRN="
+                        + requestReferNumber);
+
+            } else {
+                // Non-retryable WhatsApp error — DLQ directly
+                WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                        requestReferNumber,
+                        "WA_ERR | " + statusCode + " | " + errorDescription);
+
+                WhatsAppManager.insertAuditWhatsAppWorkflow(
+                        requestReferNumber, requestReferNumber, 1,
+                        "D", "WA_ERR | " + statusCode + " | " + errorDescription);
+
+                whatsApplogger.warn(datamap.get("mobilerequestId")
+                        + " : WhatsApp error is non-retryable. Moving to DLQ."
+                        + " STATUS_CODE=" + statusCode);
+            }
+        }
+
+    } catch (Exception e) {
+        // Network/connection/timeout — always retryable
+        whatsApplogger.error(datamap.get("mobilerequestId")
+                + " : Exception while API call : " + e.getMessage());
+
+        String newRequestId = generateReferenceNumber(inputSource);
+
+        WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                requestReferNumber, newRequestId,
+                "EXCEPTION | " + e.getMessage(),
+                retryIntervalMinutes);
+
+        WhatsAppManager.insertAuditWhatsAppWorkflow(
+                requestReferNumber, requestReferNumber,
+                1, "F", "EXCEPTION | " + e.getMessage());
+    }
+
+    return apiRespMap;
+}
