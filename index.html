@@ -150,3 +150,280 @@ public static Map<String, Object> postDataToWhatsApp(Map<String, Object> datamap
 
     return apiRespMap;
 }
+
+
+
+
+
+
+
+
+
+
+                  package com.tcs.cbslite.notifications.cbsq;
+
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.lang.RandomStringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import com.google.common.reflect.TypeToken;
+import com.google.gson.Gson;
+import com.tcs.cbslite.notification.apiClient.ApiClientWhatsApp;
+import com.tcs.cbslite.notification.db.WhatsAppManager;
+import com.tcs.cbslite.notifications.launcher.NE_WhatsAppQLauncher;
+import com.tcs.cbslite.notifications.launcher.NE_WhatsAppRetryLauncher;
+import com.tcs.cbslite.notifications.util.Notification_Utility;
+import com.tcs.cbslite.notifications.util.NePropertyFileReader;
+import com.tcs.cbslite.notifications.util.NeConstants;
+
+public class NE_WhatsAppRetry implements Runnable {
+
+    private static final Logger log = LogManager.getLogger(NE_WhatsAppRetryLauncher.class);
+    private static DateFormat format = new SimpleDateFormat("HH:mm:ss.SS");
+    private final int retryIntervalMinutes;
+
+    public NE_WhatsAppRetry(int retryIntervalMinutes) {
+        this.retryIntervalMinutes = retryIntervalMinutes;
+    }
+
+    @Override
+    public void run() {
+        log.info("WhatsApp retry scheduler triggered.");
+
+        Gson gson = new Gson();
+
+        try {
+            List<Map<String, Object>> retryRecords =
+                    WhatsAppManager.fetchRetryRecodrsWhatsAppWorkflow();
+
+            log.info("Records found for retry: " + retryRecords.size());
+
+            for (Map<String, Object> record : retryRecords) {
+
+                String originalRRN = (String) record.get("ORIGINAL_RRN");
+                String payloadJson = (String) record.get("PAYLOAD");
+                int retryCount     = Integer.parseInt(record.get("RETRY_COUNT").toString());
+                int maxRetry       = Integer.parseInt(record.get("MAX_RETRY").toString());
+                int attemptNumber  = retryCount + 1;
+
+                log.info("Retrying for ORIGINAL_RRN=" + originalRRN
+                        + " attempt=" + attemptNumber);
+
+                // Rebuild datamap from stored payload
+                Map<String, Object> datamap = gson.fromJson(payloadJson,
+                        new TypeToken<Map<String, Object>>() {}.getType());
+
+                // New RRN for this retry — WhatsApp expects new RRN every time
+                String newRRN = Notification_Utility.generateReferenceNumber(
+                        NE_WhatsAppQLauncher.inputSourceId);
+
+                try {
+                    log.info("Retrying WhatsApp. ORIGINAL_RRN=" + originalRRN
+                            + " newRRN=" + newRRN
+                            + " attempt=" + attemptNumber);
+
+                    // Prepare encrypted request with new RRN
+                    String key = RandomStringUtils.randomAlphanumeric(32);
+                    String encryptedData = Notification_Utility
+                            .prepareEncryptedEisJsonReqforWhatsApp(
+                                    datamap, key,
+                                    NE_WhatsAppRetryLauncher.inputSourceId,
+                                    newRRN);
+
+                    String eisUrl = NE_WhatsAppRetryLauncher.eisWhatsAppDns
+                            + NE_WhatsAppRetryLauncher.eisWhatsAppUrl;
+
+                    // Call EIS API
+                    Map<String, Object> apiRespMap =
+                            ApiClientWhatsApp.callEISApi(encryptedData, eisUrl, key);
+
+                    log.info("ORIGINAL_RRN=" + originalRRN
+                            + " Full API Response: " + apiRespMap);
+
+                    // ─────────────────────────────────────
+                    // Level 1 — Check EIS level error first
+                    // ─────────────────────────────────────
+                    String eisErrorCode = (String) apiRespMap.get("ERROR_CODE");
+
+                    if (eisErrorCode != null && !eisErrorCode.isEmpty()) {
+
+                        String eisErrorDesc = (String) apiRespMap.get("ERROR_DESCRIPTION");
+
+                        log.warn("ORIGINAL_RRN=" + originalRRN
+                                + " EIS level error. ERROR_CODE=" + eisErrorCode
+                                + " DESC=" + eisErrorDesc);
+
+                        if (isRetryableEisErrorCode(eisErrorCode)) {
+                            // Retryable EIS error
+                            handleFailure(originalRRN, newRRN, attemptNumber,
+                                    retryCount, maxRetry,
+                                    "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+                        } else {
+                            // Non-retryable EIS error — DLQ directly
+                            WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                                    originalRRN,
+                                    "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+
+                            WhatsAppManager.insertAuditWhatsAppWorkflow(
+                                    originalRRN, newRRN, attemptNumber,
+                                    "D",
+                                    "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+
+                            log.warn("ORIGINAL_RRN=" + originalRRN
+                                    + " Non-retryable EIS error. Moved to DLQ."
+                                    + " ERROR_CODE=" + eisErrorCode);
+                        }
+
+                        continue; // skip WhatsApp level check
+                    }
+
+                    // ─────────────────────────────────────
+                    // Level 2 — Check WhatsApp level response
+                    // ─────────────────────────────────────
+                    Map<String, Object> eisResponse =
+                            (Map<String, Object>) apiRespMap.get("EIS_RESPONSE");
+                    String statusCode       = (String) eisResponse.get("STATUS_CODE");
+                    String errorDescription = (String) eisResponse.get("DESCRIPTION");
+
+                    log.info("ORIGINAL_RRN=" + originalRRN
+                            + " WhatsApp STATUS_CODE=" + statusCode);
+
+                    if ("00".equals(statusCode)) {
+                        // SUCCESS
+                        WhatsAppManager.updateSuccessFlagWhatsAppWorkflow(originalRRN);
+
+                        WhatsAppManager.insertAuditWhatsAppWorkflow(
+                                originalRRN, newRRN, attemptNumber, "V", null);
+
+                        log.info("Retry SUCCESS. ORIGINAL_RRN=" + originalRRN);
+
+                    } else {
+                        // WhatsApp level error
+                        log.warn("ORIGINAL_RRN=" + originalRRN
+                                + " WhatsApp level error. STATUS_CODE=" + statusCode
+                                + " DESC=" + errorDescription);
+
+                        if (isRetryableWhatsAppStatusCode(statusCode)) {
+                            // Retryable WhatsApp error
+                            handleFailure(originalRRN, newRRN, attemptNumber,
+                                    retryCount, maxRetry,
+                                    "WA_ERR | " + statusCode + " | " + errorDescription);
+                        } else {
+                            // Non-retryable WhatsApp error — DLQ directly
+                            WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                                    originalRRN,
+                                    "WA_ERR | " + statusCode + " | " + errorDescription);
+
+                            WhatsAppManager.insertAuditWhatsAppWorkflow(
+                                    originalRRN, newRRN, attemptNumber,
+                                    "D",
+                                    "WA_ERR | " + statusCode + " | " + errorDescription);
+
+                            log.warn("ORIGINAL_RRN=" + originalRRN
+                                    + " Non-retryable WhatsApp error. Moved to DLQ."
+                                    + " STATUS_CODE=" + statusCode);
+                        }
+                    }
+
+                } catch (Exception e) {
+                    // Network/connection/timeout — always retryable
+                    log.error("ORIGINAL_RRN=" + originalRRN
+                            + " Retry exception: " + e.getMessage(), e);
+
+                    handleFailure(originalRRN, newRRN, attemptNumber,
+                            retryCount, maxRetry,
+                            "EXCEPTION | " + e.getMessage());
+                }
+            }
+
+        } catch (Exception e) {
+            log.error("WhatsApp retry scheduler error: " + e.getMessage(), e);
+            e.printStackTrace();
+        }
+    }
+
+
+    // ─────────────────────────────────────
+    // Handle failure — retry or DLQ
+    // ─────────────────────────────────────
+    private void handleFailure(String originalRrn, String currentRequestId,
+                                int attemptNumber, int retryCount,
+                                int maxRetry, String errorDetail) {
+        try {
+            // Always audit this attempt
+            WhatsAppManager.insertAuditWhatsAppWorkflow(
+                    originalRrn, currentRequestId,
+                    attemptNumber, "F", errorDetail);
+
+            if ((retryCount + 1) >= maxRetry) {
+                // Max retries exhausted — move to DLQ
+                WhatsAppManager.updateDlqFlagWhatsAppWorkflow(originalRrn, errorDetail);
+                log.warn("Max retries exhausted. Moved to DLQ. ORIGINAL_RRN=" + originalRrn);
+
+            } else {
+                // Generate next RRN for next retry attempt
+                String nextRRN = Notification_Utility.generateReferenceNumber(
+                        NE_WhatsAppQLauncher.inputSourceId);
+
+                WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                        originalRrn, nextRRN,
+                        errorDetail, retryIntervalMinutes);
+
+                log.warn("Retry failed. Will retry again."
+                        + " ORIGINAL_RRN=" + originalRrn
+                        + " nextRRN=" + nextRRN
+                        + " attempt=" + attemptNumber
+                        + " remaining=" + (maxRetry - retryCount - 1));
+            }
+
+        } catch (Exception e) {
+            log.error("handleFailure error. ORIGINAL_RRN=" + originalRrn
+                    + " : " + e.getMessage(), e);
+        }
+    }
+
+
+    // ─────────────────────────────────────
+    // Check EIS level error code
+    // ─────────────────────────────────────
+    private boolean isRetryableEisErrorCode(String errorCode) {
+        if (errorCode == null || errorCode.isEmpty()) return false;
+
+        String retryCodes = NePropertyFileReader.getPropertyKeyValue(
+                NeConstants.NE_PROPERTY_FILENAME.toString(),
+                "WHATSAPP_EIS_RETRY_ERROR_CODES");
+
+        if (retryCodes == null || retryCodes.isEmpty()) return false;
+
+        return Arrays.asList(retryCodes.split(","))
+                     .contains(errorCode.trim().toUpperCase());
+    }
+
+
+    // ─────────────────────────────────────
+    // Check WhatsApp level status code
+    // ─────────────────────────────────────
+    private boolean isRetryableWhatsAppStatusCode(String statusCode) {
+        if (statusCode == null || statusCode.isEmpty()) return false;
+
+        String retryCodes = NePropertyFileReader.getPropertyKeyValue(
+                NeConstants.NE_PROPERTY_FILENAME.toString(),
+                "WHATSAPP_WA_RETRY_STATUS_CODES");
+
+        if (retryCodes == null || retryCodes.isEmpty()) return false;
+
+        return Arrays.asList(retryCodes.split(","))
+                     .contains(statusCode.trim().toUpperCase());
+    }
+}
+
+
+
+
+                  
