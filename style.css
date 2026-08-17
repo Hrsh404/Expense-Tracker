@@ -47,3 +47,38 @@ body {
     cursor: pointer;
     margin-left: 10px;
 }
+
+
+public static void updateDlqFlagWhatsAppWorkflow(String originalRrn,
+                                                      String errorDetail) {
+        Connection conn = null;
+        PreparedStatement pstmt = null;
+
+        try {
+            conn = ConnectionManager.getConnection();
+            pstmt = conn.prepareStatement(UPDATE_DLQ);
+            pstmt.setObject(1, STATUS_DLQ);
+            pstmt.setObject(2, errorDetail);
+            pstmt.setObject(3, originalRrn);
+            pstmt.executeUpdate();
+
+            conn.commit();
+
+            log.warn(originalRrn + " : WhatsApp workflow moved to DLQ.");
+
+        } catch (SQLException sqe) {
+            log.error(originalRrn
+                    + " : updateDlqFlagWhatsAppWorkflow failed : " + sqe.getMessage());
+        } finally {
+            closeResources(pstmt, null, conn);
+        }
+    }
+
+
+
+private static final String UPDATE_DLQ =
+            "UPDATE WHATSAPP_WORKFLOW " +
+            "SET STATUS          = ?, " +
+            "    ERROR_DETAIL    = ?, " +
+            "    LAST_UPDATED_AT = SYSTIMESTAMP " +
+            "WHERE ORIGINAL_RRN = ?";
