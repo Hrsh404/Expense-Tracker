@@ -1,429 +1,170 @@
-public static Map<String, Object> postDataToWhatsApp(Map<String, Object> datamap,
-                                                      String apiUrl,
-                                                      String urlPath,
-                                                      String inputSource) {
-    Map<String, Object> apiRespMap = new HashMap();
-    String eisUrl = apiUrl + urlPath;
-    String requestReferNumber = generateReferenceNumber(inputSource);
-
-    try {
-        // Step 1 — Save to DB as PENDING
-        WhatsAppManager.insertIntoWhatsAppWorkflow(datamap, requestReferNumber);
-
-        // Step 2 — Prepare and call EIS
-        String key = RandomStringUtils.randomAlphanumeric(32);
-        String encryptedData = prepareEncryptedEisJsonReqforWhatsApp(
-                datamap, key, inputSource, requestReferNumber);
-
-        whatsApplogger.info(datamap.get("mobilerequestId")
-                + " : Calling EIS. ORIGINAL_RRN=" + requestReferNumber);
-
-        apiRespMap = ApiClientWhatsApp.callEISApi(encryptedData, eisUrl, key);
-        whatsApplogger.info("Full API Response: " + apiRespMap);
-
-        // ─────────────────────────────────────
-        // Step 3 — Check EIS level error first
-        // ─────────────────────────────────────
-        String eisErrorCode = (String) apiRespMap.get("ERROR_CODE");
-
-        if (eisErrorCode != null && !eisErrorCode.isEmpty()) {
-            // EIS level error received
-            String eisErrorDesc = (String) apiRespMap.get("ERROR_DESCRIPTION");
-
-            whatsApplogger.warn(datamap.get("mobilerequestId")
-                    + " : EIS level error. ERROR_CODE=" + eisErrorCode
-                    + " DESC=" + eisErrorDesc);
-
-            if (isRetryableEisErrorCode(eisErrorCode)) {
-                // Retryable EIS error — mark FAILED
-                String newRequestId = generateReferenceNumber(inputSource);
-
-                WhatsAppManager.updateFailFlagWhatsAppWorkflow(
-                        requestReferNumber, newRequestId,
-                        "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc,
-                        retryIntervalMinutes);
-
-                WhatsAppManager.insertAuditWhatsAppWorkflow(
-                        requestReferNumber, requestReferNumber, 1,
-                        "F", "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
-
-                whatsApplogger.warn(datamap.get("mobilerequestId")
-                        + " : EIS error is retryable. Will retry. ORIGINAL_RRN="
-                        + requestReferNumber);
-
-            } else {
-                // Non-retryable EIS error — DLQ directly
-                WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
-                        requestReferNumber,
-                        "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+WhatsApp CR – Technical Solution
 
-                WhatsAppManager.insertAuditWhatsAppWorkflow(
-                        requestReferNumber, requestReferNumber, 1,
-                        "D", "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
+1. System Architecture
 
-                whatsApplogger.warn(datamap.get("mobilerequestId")
-                        + " : EIS error is non-retryable. Moving to DLQ."
-                        + " ERROR_CODE=" + eisErrorCode);
-            }
+The proposed WhatsApp CR implementation introduces a dedicated WhatsApp processing flow within the existing Notification Engine (NE), while keeping the existing NE processing flow unchanged.
 
-            return apiRespMap; // stop here — no point checking WhatsApp response
-        }
+The high-level flow is as follows:
 
-        // ─────────────────────────────────────
-        // Step 4 — Check WhatsApp level response
-        // ─────────────────────────────────────
-        Map<String, Object> eisResponse =
-                (Map<String, Object>) apiRespMap.get("EIS_RESPONSE");
+CBS → MQ → Notification Engine (NE)
 
-        String statusCode       = (String) eisResponse.get("STATUS_CODE");
-        String errorDescription = (String) eisResponse.get("DESCRIPTION");
+Upon receiving a message from CBS through MQ:
 
-        whatsApplogger.info(datamap.get("mobilerequestId")
-                + " : WhatsApp STATUS_CODE=" + statusCode);
+1. The existing NE flow continues to process the message without any change.
+2. NE performs a WhatsApp Eligibility Check based on the Alert Code.
+3. If the Alert Code is eligible for WhatsApp communication, the relevant data is pushed to the dedicated WhatsApp Queue (WHATSAPPQ), an internal MQ queue.
+4. The WhatsApp Consumer consumes the message from WHATSAPPQ.
+5. The consumer prepares the required request payload based on the WhatsApp API specifications.
+6. The request is sent to the WhatsApp Banking API through the EIS gateway.
+7. The transaction status is maintained in the WhatsApp workflow based on the response received from EIS/WhatsApp.
 
-        if ("00".equals(statusCode)) {
-            // WhatsApp SUCCESS
-            WhatsAppManager.updateSuccessFlagWhatsAppWorkflow(requestReferNumber);
+High-Level Flow
 
-            WhatsAppManager.insertAuditWhatsAppWorkflow(
-                    requestReferNumber, requestReferNumber,
-                    1, "V", null);
+CBS → MQ → NE
 
-            whatsApplogger.info(datamap.get("mobilerequestId")
-                    + " : WhatsApp SUCCESS. ORIGINAL_RRN=" + requestReferNumber);
+NE → Existing NE Flow (Unchanged)
 
-        } else {
-            // WhatsApp level error
-            whatsApplogger.warn(datamap.get("mobilerequestId")
-                    + " : WhatsApp level error. STATUS_CODE=" + statusCode
-                    + " DESC=" + errorDescription);
+NE → WhatsApp Eligibility Check → Eligible Alert Code → WHATSAPPQ
 
-            if (isRetryableWhatsAppStatusCode(statusCode)) {
-                // Retryable WhatsApp error — mark FAILED
-                String newRequestId = generateReferenceNumber(inputSource);
+WHATSAPPQ → WhatsApp Consumer → Request Payload Preparation → EIS → WhatsApp API
 
-                WhatsAppManager.updateFailFlagWhatsAppWorkflow(
-                        requestReferNumber, newRequestId,
-                        "WA_ERR | " + statusCode + " | " + errorDescription,
-                        retryIntervalMinutes);
+The WhatsApp flow is decoupled from the existing NE processing through the dedicated internal WhatsApp queue. This ensures that WhatsApp processing does not directly impact the existing NE flow and also provides a mechanism for retry and failure handling.
 
-                WhatsAppManager.insertAuditWhatsAppWorkflow(
-                        requestReferNumber, requestReferNumber, 1,
-                        "F", "WA_ERR | " + statusCode + " | " + errorDescription);
+---
 
-                whatsApplogger.warn(datamap.get("mobilerequestId")
-                        + " : WhatsApp error is retryable. Will retry. ORIGINAL_RRN="
-                        + requestReferNumber);
+2. WhatsApp Eligibility Check
 
-            } else {
-                // Non-retryable WhatsApp error — DLQ directly
-                WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
-                        requestReferNumber,
-                        "WA_ERR | " + statusCode + " | " + errorDescription);
+NE performs an eligibility check based on the Alert Code received from CBS.
 
-                WhatsAppManager.insertAuditWhatsAppWorkflow(
-                        requestReferNumber, requestReferNumber, 1,
-                        "D", "WA_ERR | " + statusCode + " | " + errorDescription);
+- If the Alert Code is not eligible, the existing NE processing continues without any WhatsApp-specific processing.
+- If the Alert Code is eligible, the required WhatsApp data is pushed to WHATSAPPQ for further processing.
 
-                whatsApplogger.warn(datamap.get("mobilerequestId")
-                        + " : WhatsApp error is non-retryable. Moving to DLQ."
-                        + " STATUS_CODE=" + statusCode);
-            }
-        }
+This approach allows additional Alert Codes to be enabled for WhatsApp communication in the future without impacting the existing NE processing flow.
 
-    } catch (Exception e) {
-        // Network/connection/timeout — always retryable
-        whatsApplogger.error(datamap.get("mobilerequestId")
-                + " : Exception while API call : " + e.getMessage());
+---
 
-        String newRequestId = generateReferenceNumber(inputSource);
+3. WhatsApp Queue Processing
 
-        WhatsAppManager.updateFailFlagWhatsAppWorkflow(
-                requestReferNumber, newRequestId,
-                "EXCEPTION | " + e.getMessage(),
-                retryIntervalMinutes);
+The eligible WhatsApp data is published to the dedicated WHATSAPPQ internal MQ queue.
 
-        WhatsAppManager.insertAuditWhatsAppWorkflow(
-                requestReferNumber, requestReferNumber,
-                1, "F", "EXCEPTION | " + e.getMessage());
-    }
+The WhatsApp Consumer consumes the message from WHATSAPPQ and performs the following activities:
 
-    return apiRespMap;
-}
+1. Consume the WhatsApp message from WHATSAPPQ.
+2. Validate and process the received data.
+3. Prepare the request body as per the WhatsApp API specification.
+4. Invoke the WhatsApp API through the EIS gateway.
+5. Process the response received from EIS/WhatsApp.
+6. Update the corresponding WhatsApp workflow status.
+7. Initiate retry processing for retryable failures.
 
+---
 
+4. WhatsApp Request Processing Through EIS
 
+The WhatsApp Consumer does not directly invoke the external WhatsApp API. The request is routed through the EIS gateway.
 
+The processing sequence is:
 
+WHATSAPPQ → WhatsApp Consumer → Request Body Preparation → EIS → WhatsApp API
 
+The consumer prepares the required EIS request structure containing the necessary WhatsApp transaction information and invokes the EIS service.
 
+The response received from EIS and the WhatsApp API is evaluated to determine whether the transaction is successful, retryable, or non-retryable.
 
+---
 
+5. Transaction Status Management
 
-                  package com.tcs.cbslite.notifications.cbsq;
+The WhatsApp workflow maintains the processing status of each transaction.
 
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+Status| Meaning
+P – Pending| Request has been saved and is pending processing/sending.
+V – Success| WhatsApp/EIS processing completed successfully and a success response was received.
+F – Failed| Processing failed due to a retryable error and the transaction is eligible for retry.
+D – DLQ| Transaction is moved to Dead Letter Queue processing due to a non-retryable error or exhaustion of maximum retry attempts.
 
-import org.apache.commons.lang.RandomStringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+Status Flow
 
-import com.google.common.reflect.TypeToken;
-import com.google.gson.Gson;
-import com.tcs.cbslite.notification.apiClient.ApiClientWhatsApp;
-import com.tcs.cbslite.notification.db.WhatsAppManager;
-import com.tcs.cbslite.notifications.launcher.NE_WhatsAppQLauncher;
-import com.tcs.cbslite.notifications.launcher.NE_WhatsAppRetryLauncher;
-import com.tcs.cbslite.notifications.util.Notification_Utility;
-import com.tcs.cbslite.notifications.util.NePropertyFileReader;
-import com.tcs.cbslite.notifications.util.NeConstants;
+P → V
+Successful processing.
 
-public class NE_WhatsAppRetry implements Runnable {
+P → F → V
+Retryable failure followed by successful retry.
 
-    private static final Logger log = LogManager.getLogger(NE_WhatsAppRetryLauncher.class);
-    private static DateFormat format = new SimpleDateFormat("HH:mm:ss.SS");
-    private final int retryIntervalMinutes;
+P → F → D
+Retryable failure followed by exhaustion of maximum retry attempts.
 
-    public NE_WhatsAppRetry(int retryIntervalMinutes) {
-        this.retryIntervalMinutes = retryIntervalMinutes;
-    }
+P → D
+Non-retryable failure.
 
-    @Override
-    public void run() {
-        log.info("WhatsApp retry scheduler triggered.");
+---
 
-        Gson gson = new Gson();
+6. Response and Error Handling
 
-        try {
-            List<Map<String, Object>> retryRecords =
-                    WhatsAppManager.fetchRetryRecodrsWhatsAppWorkflow();
+The response received during WhatsApp processing is categorized based on the error type.
 
-            log.info("Records found for retry: " + retryRecords.size());
+Scenario| Action
+Success Response| Mark transaction as V (Success).
+EIS Retryable Error| Mark transaction as F and allow Retry Scheduler to retry.
+EIS Non-Retryable Error| Mark transaction as D and move the transaction to DLQ.
+WhatsApp Retryable Error| Mark transaction as F and allow Retry Scheduler to retry.
+WhatsApp Non-Retryable Error| Mark transaction as D and move the transaction to DLQ.
+Maximum Retries Exhausted| Mark transaction as D and move the transaction to DLQ.
 
-            for (Map<String, Object> record : retryRecords) {
+The retryability of an error is determined based on the configured EIS and WhatsApp error/status codes.
 
-                String originalRRN = (String) record.get("ORIGINAL_RRN");
-                String payloadJson = (String) record.get("PAYLOAD");
-                int retryCount     = Integer.parseInt(record.get("RETRY_COUNT").toString());
-                int maxRetry       = Integer.parseInt(record.get("MAX_RETRY").toString());
-                int attemptNumber  = retryCount + 1;
+---
 
-                log.info("Retrying for ORIGINAL_RRN=" + originalRRN
-                        + " attempt=" + attemptNumber);
+7. Retry Mechanism
 
-                // Rebuild datamap from stored payload
-                Map<String, Object> datamap = gson.fromJson(payloadJson,
-                        new TypeToken<Map<String, Object>>() {}.getType());
+A dedicated Retry Scheduler is responsible for processing transactions that have failed with retryable errors.
 
-                // New RRN for this retry — WhatsApp expects new RRN every time
-                String newRRN = Notification_Utility.generateReferenceNumber(
-                        NE_WhatsAppQLauncher.inputSourceId);
+The scheduler periodically identifies transactions having:
 
-                try {
-                    log.info("Retrying WhatsApp. ORIGINAL_RRN=" + originalRRN
-                            + " newRRN=" + newRRN
-                            + " attempt=" + attemptNumber);
+STATUS = F
 
-                    // Prepare encrypted request with new RRN
-                    String key = RandomStringUtils.randomAlphanumeric(32);
-                    String encryptedData = Notification_Utility
-                            .prepareEncryptedEisJsonReqforWhatsApp(
-                                    datamap, key,
-                                    NE_WhatsAppRetryLauncher.inputSourceId,
-                                    newRRN);
-
-                    String eisUrl = NE_WhatsAppRetryLauncher.eisWhatsAppDns
-                            + NE_WhatsAppRetryLauncher.eisWhatsAppUrl;
+For each eligible transaction, the scheduler initiates the WhatsApp processing again.
 
-                    // Call EIS API
-                    Map<String, Object> apiRespMap =
-                            ApiClientWhatsApp.callEISApi(encryptedData, eisUrl, key);
+The retry process continues until either:
 
-                    log.info("ORIGINAL_RRN=" + originalRRN
-                            + " Full API Response: " + apiRespMap);
-
-                    // ─────────────────────────────────────
-                    // Level 1 — Check EIS level error first
-                    // ─────────────────────────────────────
-                    String eisErrorCode = (String) apiRespMap.get("ERROR_CODE");
+- The request is successfully processed, in which case the status is updated to V; or
+- A non-retryable error is received, in which case the status is updated to D; or
+- The configured maximum retry count is exhausted, in which case the status is updated to D and the transaction is moved to DLQ.
 
-                    if (eisErrorCode != null && !eisErrorCode.isEmpty()) {
-
-                        String eisErrorDesc = (String) apiRespMap.get("ERROR_DESCRIPTION");
-
-                        log.warn("ORIGINAL_RRN=" + originalRRN
-                                + " EIS level error. ERROR_CODE=" + eisErrorCode
-                                + " DESC=" + eisErrorDesc);
-
-                        if (isRetryableEisErrorCode(eisErrorCode)) {
-                            // Retryable EIS error
-                            handleFailure(originalRRN, newRRN, attemptNumber,
-                                    retryCount, maxRetry,
-                                    "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
-                        } else {
-                            // Non-retryable EIS error — DLQ directly
-                            WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
-                                    originalRRN,
-                                    "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
-
-                            WhatsAppManager.insertAuditWhatsAppWorkflow(
-                                    originalRRN, newRRN, attemptNumber,
-                                    "D",
-                                    "EIS_ERR | " + eisErrorCode + " | " + eisErrorDesc);
-
-                            log.warn("ORIGINAL_RRN=" + originalRRN
-                                    + " Non-retryable EIS error. Moved to DLQ."
-                                    + " ERROR_CODE=" + eisErrorCode);
-                        }
-
-                        continue; // skip WhatsApp level check
-                    }
-
-                    // ─────────────────────────────────────
-                    // Level 2 — Check WhatsApp level response
-                    // ─────────────────────────────────────
-                    Map<String, Object> eisResponse =
-                            (Map<String, Object>) apiRespMap.get("EIS_RESPONSE");
-                    String statusCode       = (String) eisResponse.get("STATUS_CODE");
-                    String errorDescription = (String) eisResponse.get("DESCRIPTION");
-
-                    log.info("ORIGINAL_RRN=" + originalRRN
-                            + " WhatsApp STATUS_CODE=" + statusCode);
-
-                    if ("00".equals(statusCode)) {
-                        // SUCCESS
-                        WhatsAppManager.updateSuccessFlagWhatsAppWorkflow(originalRRN);
-
-                        WhatsAppManager.insertAuditWhatsAppWorkflow(
-                                originalRRN, newRRN, attemptNumber, "V", null);
-
-                        log.info("Retry SUCCESS. ORIGINAL_RRN=" + originalRRN);
-
-                    } else {
-                        // WhatsApp level error
-                        log.warn("ORIGINAL_RRN=" + originalRRN
-                                + " WhatsApp level error. STATUS_CODE=" + statusCode
-                                + " DESC=" + errorDescription);
-
-                        if (isRetryableWhatsAppStatusCode(statusCode)) {
-                            // Retryable WhatsApp error
-                            handleFailure(originalRRN, newRRN, attemptNumber,
-                                    retryCount, maxRetry,
-                                    "WA_ERR | " + statusCode + " | " + errorDescription);
-                        } else {
-                            // Non-retryable WhatsApp error — DLQ directly
-                            WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
-                                    originalRRN,
-                                    "WA_ERR | " + statusCode + " | " + errorDescription);
-
-                            WhatsAppManager.insertAuditWhatsAppWorkflow(
-                                    originalRRN, newRRN, attemptNumber,
-                                    "D",
-                                    "WA_ERR | " + statusCode + " | " + errorDescription);
-
-                            log.warn("ORIGINAL_RRN=" + originalRRN
-                                    + " Non-retryable WhatsApp error. Moved to DLQ."
-                                    + " STATUS_CODE=" + statusCode);
-                        }
-                    }
-
-                } catch (Exception e) {
-                    // Network/connection/timeout — always retryable
-                    log.error("ORIGINAL_RRN=" + originalRRN
-                            + " Retry exception: " + e.getMessage(), e);
-
-                    handleFailure(originalRRN, newRRN, attemptNumber,
-                            retryCount, maxRetry,
-                            "EXCEPTION | " + e.getMessage());
-                }
-            }
-
-        } catch (Exception e) {
-            log.error("WhatsApp retry scheduler error: " + e.getMessage(), e);
-            e.printStackTrace();
-        }
-    }
-
-
-    // ─────────────────────────────────────
-    // Handle failure — retry or DLQ
-    // ─────────────────────────────────────
-    private void handleFailure(String originalRrn, String currentRequestId,
-                                int attemptNumber, int retryCount,
-                                int maxRetry, String errorDetail) {
-        try {
-            // Always audit this attempt
-            WhatsAppManager.insertAuditWhatsAppWorkflow(
-                    originalRrn, currentRequestId,
-                    attemptNumber, "F", errorDetail);
-
-            if ((retryCount + 1) >= maxRetry) {
-                // Max retries exhausted — move to DLQ
-                WhatsAppManager.updateDlqFlagWhatsAppWorkflow(originalRrn, errorDetail);
-                log.warn("Max retries exhausted. Moved to DLQ. ORIGINAL_RRN=" + originalRrn);
-
-            } else {
-                // Generate next RRN for next retry attempt
-                String nextRRN = Notification_Utility.generateReferenceNumber(
-                        NE_WhatsAppQLauncher.inputSourceId);
-
-                WhatsAppManager.updateFailFlagWhatsAppWorkflow(
-                        originalRrn, nextRRN,
-                        errorDetail, retryIntervalMinutes);
-
-                log.warn("Retry failed. Will retry again."
-                        + " ORIGINAL_RRN=" + originalRrn
-                        + " nextRRN=" + nextRRN
-                        + " attempt=" + attemptNumber
-                        + " remaining=" + (maxRetry - retryCount - 1));
-            }
-
-        } catch (Exception e) {
-            log.error("handleFailure error. ORIGINAL_RRN=" + originalRrn
-                    + " : " + e.getMessage(), e);
-        }
-    }
-
-
-    // ─────────────────────────────────────
-    // Check EIS level error code
-    // ─────────────────────────────────────
-    private boolean isRetryableEisErrorCode(String errorCode) {
-        if (errorCode == null || errorCode.isEmpty()) return false;
-
-        String retryCodes = NePropertyFileReader.getPropertyKeyValue(
-                NeConstants.NE_PROPERTY_FILENAME.toString(),
-                "WHATSAPP_EIS_RETRY_ERROR_CODES");
-
-        if (retryCodes == null || retryCodes.isEmpty()) return false;
-
-        return Arrays.asList(retryCodes.split(","))
-                     .contains(errorCode.trim().toUpperCase());
-    }
-
-
-    // ─────────────────────────────────────
-    // Check WhatsApp level status code
-    // ─────────────────────────────────────
-    private boolean isRetryableWhatsAppStatusCode(String statusCode) {
-        if (statusCode == null || statusCode.isEmpty()) return false;
-
-        String retryCodes = NePropertyFileReader.getPropertyKeyValue(
-                NeConstants.NE_PROPERTY_FILENAME.toString(),
-                "WHATSAPP_WA_RETRY_STATUS_CODES");
-
-        if (retryCodes == null || retryCodes.isEmpty()) return false;
-
-        return Arrays.asList(retryCodes.split(","))
-                     .contains(statusCode.trim().toUpperCase());
-    }
-}
-
-
-
-
-                  
+Retry Flow
+
+STATUS = F → Retry Scheduler → Retry WhatsApp Request
+
+Successful Retry → STATUS = V
+
+Retryable Failure → STATUS = F → Retry on next scheduler cycle
+
+Non-Retryable Failure → STATUS = D → DLQ
+
+Maximum Retry Count Reached → STATUS = D → DLQ
+
+---
+
+8. Dead Letter Queue (DLQ) Handling
+
+Transactions are moved to DLQ processing when:
+
+- A non-retryable EIS error is received.
+- A non-retryable WhatsApp error is received.
+- The maximum configured retry count is exhausted.
+
+Such transactions are marked with STATUS = D to indicate that automated processing has been completed and the transaction requires DLQ handling/manual investigation as applicable.
+
+---
+
+9. Key Design Considerations
+
+- The existing NE flow remains unchanged.
+- WhatsApp processing is triggered only for configured/eligible Alert Codes.
+- A dedicated WHATSAPPQ is used to decouple WhatsApp processing from the existing NE flow.
+- The WhatsApp Consumer is responsible for preparing the WhatsApp API request.
+- Communication with the external WhatsApp API is performed through EIS.
+- Transaction status is persisted throughout the processing lifecycle.
+- Retryable failures are handled asynchronously through the Retry Scheduler.
+- Non-retryable failures and exhausted retries are routed to DLQ.
+- The design supports adding additional WhatsApp-eligible Alert Codes in the future with minimal impact to the existing NE processing.
