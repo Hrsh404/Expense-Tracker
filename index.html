@@ -168,3 +168,20 @@ Such transactions are marked with STATUS = D to indicate that automated processi
 - Retryable failures are handled asynchronously through the Retry Scheduler.
 - Non-retryable failures and exhausted retries are routed to DLQ.
 - The design supports adding additional WhatsApp-eligible Alert Codes in the future with minimal impact to the existing NE processing.
+
+
+
+
+
+private final static String fetchRetryRecordsWhatsAppWorkflow =
+        "SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY " +
+        "FROM ( " +
+        "    SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY " +
+        "    FROM WHATSAPP_WORKFLOW " +
+        "    WHERE STATUS = ? " +
+        "    AND RETRY_COUNT < MAX_RETRY " +
+        "    AND NEXT_RETRY_AT <= SYSTIMESTAMP + 30/(24*60*60) " +
+        "    ORDER BY NEXT_RETRY_AT ASC " +
+        ") " +
+        "WHERE ROWNUM <= ? " +
+        "FOR UPDATE SKIP LOCKED";
