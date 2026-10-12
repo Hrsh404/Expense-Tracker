@@ -1,223 +1,153 @@
-WhatsApp CR – Technical Solution
+SELECT REQUEST_ID, ORIGINAL_REQUEST_ID, ALERT_CODE,
+PAYLOAD, RETRY_COUNT, MAX_RETRY
+FROM WHATSAPP_WORKFLOW
+WHERE STATUS = 'F'
+AND RETRY_COUNT < MAX_RETRY
+AND NEXT_RETRY_AT <= SYSTIMESTAMP
+ORDER BY NEXT_RETRY_AT ASC
+FETCH FIRST ? ROWS ONLY
+FOR UPDATE SKIP LOCKED
+
+
+                        public static List<Map<String, Object>> fetchRetryRecodrsWhatsAppWorkflow(int batchSize) {
+
+    Connection conn = null;
+    PreparedStatement fetchStmt = null;
+    PreparedStatement updateStmt = null;
+    ResultSet rSet = null;
+
+    try {
+        conn = ConnectionManager.getConnection();
+
+        // Step 1 — Fetch with lock
+        fetchStmt = conn.prepareStatement(fetchRetryRecordsWhatsAppWorkflow);
+        fetchStmt.setObject(1, "F");
+        fetchStmt.setInt(2, batchSize);
+        rSet = fetchStmt.executeQuery();
+
+        List<Map<String, Object>> records = new ArrayList<>();
+        List<String> originalRRNs = new ArrayList<>();
+
+        while (rSet.next()) {
+            Map<String, Object> row = new HashMap<>();
+            row.put("REQUEST_ID",          rSet.getString("REQUEST_ID"));
+            row.put("ORIGINAL_REQUEST_ID", rSet.getString("ORIGINAL_REQUEST_ID"));
+            row.put("ALERT_CODE",          rSet.getString("ALERT_CODE"));
+            row.put("PAYLOAD",             rSet.getString("PAYLOAD"));
+            row.put("RETRY_COUNT",         rSet.getString("RETRY_COUNT"));
+            row.put("MAX_RETRY",           rSet.getString("MAX_RETRY"));
+            records.add(row);
+            originalRRNs.add(rSet.getString("ORIGINAL_REQUEST_ID"));
+        }
+
+        // Step 2 — Mark all fetched records as IN_PROGRESS
+        // Same connection — lock still held
+        if (!originalRRNs.isEmpty()) {
+            String placeholders = String.join(",",
+                    Collections.nCopies(originalRRNs.size(), "?"));
+
+            String updateSql = "UPDATE WHATSAPP_WORKFLOW SET STATUS = 'I', " +
+                    "LAST_UPDATED_AT = SYSTIMESTAMP " +
+                    "WHERE ORIGINAL_REQUEST_ID IN (" + placeholders + ")";
+
+            updateStmt = conn.prepareStatement(updateSql);
+            for (int i = 0; i < originalRRNs.size(); i++) {
+                updateStmt.setString(i + 1, originalRRNs.get(i));
+            }
+            updateStmt.executeUpdate();
+        }
+
+        // Step 3 — Commit — releases FOR UPDATE lock
+        // Records now marked I — other instances skip them
+        conn.commit();
+
+        log.info("Fetched and marked " + records.size()
+                + " records as IN_PROGRESS.");
+        return records;
+
+    } catch (Exception e) {
+        log.error("fetchRetryRecodrsWhatsAppWorkflow failed: " + e.getMessage());
+        e.printStackTrace();
+    } finally {
+        try {
+            ConnectionManager.closeResultSet(rSet);
+            ConnectionManager.closeStatement(fetchStmt);
+            ConnectionManager.closeStatement(updateStmt);
+            ConnectionManager.closeConnection(conn);
+        } catch (Exception q) {
+            log.error("DB Connection could not be released: " + q.getMessage());
+        }
+    }
+
+    return new ArrayList<>();
+
+
+            
+}
+
+
+
+private void handleFailure(String originalRrn, String currentRequestId,
+                            int attemptNumber, int retryCount,
+                            int maxRetry, String errorDetail, String errorCode) {
+    try {
+        WhatsAppManager.insertAuditWhatsAppWorkflow(
+                originalRrn, currentRequestId,
+                attemptNumber, "F", errorCode, errorDetail);
+
+        if ((retryCount + 1) >= maxRetry) {
+            // Increment RETRY_COUNT first
+            WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                    originalRrn, errorCode,
+                    errorDetail, retryIntervalMinutes);
 
-1. System Architecture
+            // Then mark DLQ
+            WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                    originalRrn, errorCode, errorDetail);
 
-The proposed WhatsApp CR implementation introduces a dedicated WhatsApp processing flow within the existing Notification Engine (NE), while keeping the existing NE processing flow unchanged.
+            log.warn("Max retries exhausted. DLQ. ORIGINAL_RRN=" + originalRrn);
 
-The high-level flow is as follows:
+        } else {
+            // Back to F — eligible for next retry
+            WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                    originalRrn, errorCode,
+                    errorDetail, retryIntervalMinutes);
 
-CBS → MQ → Notification Engine (NE)
+            log.warn("Retry failed. Will retry again. ORIGINAL_RRN=" + originalRrn
+                    + " remaining=" + (maxRetry - retryCount - 1));
+        }
 
-Upon receiving a message from CBS through MQ:
+    } catch (Exception e) {
+        log.error("handleFailure error. ORIGINAL_RRN=" + originalRrn
+                + " : " + e.getMessage(), e);
+    }
+}
 
-1. The existing NE flow continues to process the message without any change.
-2. NE performs a WhatsApp Eligibility Check based on the Alert Code.
-3. If the Alert Code is eligible for WhatsApp communication, the relevant data is pushed to the dedicated WhatsApp Queue (WHATSAPPQ), an internal MQ queue.
-4. The WhatsApp Consumer consumes the message from WHATSAPPQ.
-5. The consumer prepares the required request payload based on the WhatsApp API specifications.
-6. The request is sent to the WhatsApp Banking API through the EIS gateway.
-7. The transaction status is maintained in the WhatsApp workflow based on the response received from EIS/WhatsApp.
 
-High-Level Flow
+            private final static String resetStuckRecords =
+        "UPDATE WHATSAPP_WORKFLOW " +
+        "SET STATUS = 'F', " +
+        "    NEXT_RETRY_AT = SYSTIMESTAMP, " +
+        "    LAST_UPDATED_AT = SYSTIMESTAMP " +
+        "WHERE STATUS = 'I' " +
+        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - 30/(24*60)"; // stuck for 30 mins
 
-CBS → MQ → NE
 
-NE → Existing NE Flow (Unchanged)
 
-NE → WhatsApp Eligibility Check → Eligible Alert Code → WHATSAPPQ
 
-WHATSAPPQ → WhatsApp Consumer → Request Payload Preparation → EIS → WhatsApp API
+                @Override
+public void run() {
+    log.info("WhatsApp retry scheduler triggered.");
 
-The WhatsApp flow is decoupled from the existing NE processing through the dedicated internal WhatsApp queue. This ensures that WhatsApp processing does not directly impact the existing NE flow and also provides a mechanism for retry and failure handling.
+    // First — reset any stuck IN_PROGRESS records
+    WhatsAppManager.resetStuckInProgressRecords();
 
----
+    // Then — fetch and process failed records
+    List<Map<String, Object>> retryRecords =
+            WhatsAppManager.fetchRetryRecodrsWhatsAppWorkflow(
+                    NE_WhatsAppRetryLauncher.retryBatchSize);
+    
+    // rest of processing...
+}
 
-2. WhatsApp Eligibility Check
-
-NE performs an eligibility check based on the Alert Code received from CBS.
-
-- If the Alert Code is not eligible, the existing NE processing continues without any WhatsApp-specific processing.
-- If the Alert Code is eligible, the required WhatsApp data is pushed to WHATSAPPQ for further processing.
-
-This approach allows additional Alert Codes to be enabled for WhatsApp communication in the future without impacting the existing NE processing flow.
-
----
-
-3. WhatsApp Queue Processing
-
-The eligible WhatsApp data is published to the dedicated WHATSAPPQ internal MQ queue.
-
-The WhatsApp Consumer consumes the message from WHATSAPPQ and performs the following activities:
-
-1. Consume the WhatsApp message from WHATSAPPQ.
-2. Validate and process the received data.
-3. Prepare the request body as per the WhatsApp API specification.
-4. Invoke the WhatsApp API through the EIS gateway.
-5. Process the response received from EIS/WhatsApp.
-6. Update the corresponding WhatsApp workflow status.
-7. Initiate retry processing for retryable failures.
-
----
-
-4. WhatsApp Request Processing Through EIS
-
-The WhatsApp Consumer does not directly invoke the external WhatsApp API. The request is routed through the EIS gateway.
-
-The processing sequence is:
-
-WHATSAPPQ → WhatsApp Consumer → Request Body Preparation → EIS → WhatsApp API
-
-The consumer prepares the required EIS request structure containing the necessary WhatsApp transaction information and invokes the EIS service.
-
-The response received from EIS and the WhatsApp API is evaluated to determine whether the transaction is successful, retryable, or non-retryable.
-
----
-
-5. Transaction Status Management
-
-The WhatsApp workflow maintains the processing status of each transaction.
-
-Status| Meaning
-P – Pending| Request has been saved and is pending processing/sending.
-V – Success| WhatsApp/EIS processing completed successfully and a success response was received.
-F – Failed| Processing failed due to a retryable error and the transaction is eligible for retry.
-D – DLQ| Transaction is moved to Dead Letter Queue processing due to a non-retryable error or exhaustion of maximum retry attempts.
-
-Status Flow
-
-P → V
-Successful processing.
-
-P → F → V
-Retryable failure followed by successful retry.
-
-P → F → D
-Retryable failure followed by exhaustion of maximum retry attempts.
-
-P → D
-Non-retryable failure.
-
----
-
-6. Response and Error Handling
-
-The response received during WhatsApp processing is categorized based on the error type.
-
-Scenario| Action
-Success Response| Mark transaction as V (Success).
-EIS Retryable Error| Mark transaction as F and allow Retry Scheduler to retry.
-EIS Non-Retryable Error| Mark transaction as D and move the transaction to DLQ.
-WhatsApp Retryable Error| Mark transaction as F and allow Retry Scheduler to retry.
-WhatsApp Non-Retryable Error| Mark transaction as D and move the transaction to DLQ.
-Maximum Retries Exhausted| Mark transaction as D and move the transaction to DLQ.
-
-The retryability of an error is determined based on the configured EIS and WhatsApp error/status codes.
-
----
-
-7. Retry Mechanism
-
-A dedicated Retry Scheduler is responsible for processing transactions that have failed with retryable errors.
-
-The scheduler periodically identifies transactions having:
-
-STATUS = F
-
-For each eligible transaction, the scheduler initiates the WhatsApp processing again.
-
-The retry process continues until either:
-
-- The request is successfully processed, in which case the status is updated to V; or
-- A non-retryable error is received, in which case the status is updated to D; or
-- The configured maximum retry count is exhausted, in which case the status is updated to D and the transaction is moved to DLQ.
-
-Retry Flow
-
-STATUS = F → Retry Scheduler → Retry WhatsApp Request
-
-Successful Retry → STATUS = V
-
-Retryable Failure → STATUS = F → Retry on next scheduler cycle
-
-Non-Retryable Failure → STATUS = D → DLQ
-
-Maximum Retry Count Reached → STATUS = D → DLQ
-
----
-
-8. Dead Letter Queue (DLQ) Handling
-
-Transactions are moved to DLQ processing when:
-
-- A non-retryable EIS error is received.
-- A non-retryable WhatsApp error is received.
-- The maximum configured retry count is exhausted.
-
-Such transactions are marked with STATUS = D to indicate that automated processing has been completed and the transaction requires DLQ handling/manual investigation as applicable.
-
----
-
-9. Key Design Considerations
-
-- The existing NE flow remains unchanged.
-- WhatsApp processing is triggered only for configured/eligible Alert Codes.
-- A dedicated WHATSAPPQ is used to decouple WhatsApp processing from the existing NE flow.
-- The WhatsApp Consumer is responsible for preparing the WhatsApp API request.
-- Communication with the external WhatsApp API is performed through EIS.
-- Transaction status is persisted throughout the processing lifecycle.
-- Retryable failures are handled asynchronously through the Retry Scheduler.
-- Non-retryable failures and exhausted retries are routed to DLQ.
-- The design supports adding additional WhatsApp-eligible Alert Codes in the future with minimal impact to the existing NE processing.
-
-
-
-
-
-private final static String fetchRetryRecordsWhatsAppWorkflow =
-        "SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY " +
-        "FROM ( " +
-        "    SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY " +
-        "    FROM WHATSAPP_WORKFLOW " +
-        "    WHERE STATUS = ? " +
-        "    AND RETRY_COUNT < MAX_RETRY " +
-        "    AND NEXT_RETRY_AT <= SYSTIMESTAMP + 30/(24*60*60) " +
-        "    ORDER BY NEXT_RETRY_AT ASC " +
-        ") " +
-        "WHERE ROWNUM <= ? " +
-        "FOR UPDATE SKIP LOCKED";
-
-
-
-
-SELECT W.ORIGINAL_REQUEST_ID,
-       W.ALERT_CODE,
-       W.PAYLOAD,
-       W.RETRY_COUNT,
-       W.MAX_RETRY
-FROM WHATSAPP_WORKFLOW W
-WHERE W.ROWID IN (
-    SELECT RID
-    FROM (
-        SELECT ROWID AS RID
-        FROM WHATSAPP_WORKFLOW
-        WHERE STATUS = 'F'
-          AND RETRY_COUNT < MAX_RETRY
-          AND NEXT_RETRY_AT <= SYSTIMESTAMP
-        ORDER BY NEXT_RETRY_AT ASC
-    )
-    WHERE ROWNUM <= ?
-)
-ORDER BY W.NEXT_RETRY_AT ASC
-FOR UPDATE OF W.STATUS SKIP LOCKED
-
-
-SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY FROM (SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY FROM WHATSAPP_WORKFLOW WHERE STATUS = 'F' AND RETRY_COUNT < MAX_RETRY AND NEXT_RETRY_AT <= SYSTIMESTAMP ORDER BY NEXT_RETRY_AT ASC) WHERE ROWNUM <= ? FOR UPDATE SKIP LOCKED
-
-
-
-                                  SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY FROM (SELECT ORIGINAL_REQUEST_ID, ALERT_CODE, PAYLOAD, RETRY_COUNT, MAX_RETRY FROM WHATSAPP_WORKFLOW WHERE STATUS = 'F' AND RETRY_COUNT < MAX_RETRY AND NEXT_RETRY_AT <= SYSTIMESTAMP ORDER BY NEXT_RETRY_AT ASC) WHERE ROWNUM <= ? FOR UPDATE SKIP LOCKED
-                                  
-
-
-
-                                  SELECT W.ORIGINAL_REQUEST_ID, W.ALERT_CODE, W.PAYLOAD, W.RETRY_COUNT, W.MAX_RETRY FROM WHATSAPP_WORKFLOW W WHERE W.ROWID IN (SELECT RID FROM (SELECT ROWID AS RID FROM WHATSAPP_WORKFLOW WHERE STATUS = 'F' AND RETRY_COUNT < MAX_RETRY AND NEXT_RETRY_AT <= SYSTIMESTAMP ORDER BY NEXT_RETRY_AT ASC) WHERE ROWNUM <= ?) ORDER BY W.NEXT_RETRY_AT ASC FOR UPDATE OF W.STATUS SKIP LOCKED
+            
