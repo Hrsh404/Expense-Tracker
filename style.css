@@ -82,3 +82,334 @@ private static final String UPDATE_DLQ =
             "    ERROR_DETAIL    = ?, " +
             "    LAST_UPDATED_AT = SYSTIMESTAMP " +
             "WHERE ORIGINAL_RRN = ?";
+
+
+
+
+
+
+
+            // ─────────────────────────────────────────
+// STATUS CONSTANTS
+// ─────────────────────────────────────────
+// P = Pending
+// I = In Progress
+// F = Failed
+// V = Success
+// D = DLQ
+
+// ─────────────────────────────────────────
+// UPDATED FETCH QUERY — fetches F records only
+// ─────────────────────────────────────────
+private final static String fetchRetryRecordsWhatsAppWorkflow =
+        "SELECT W.ORIGINAL_REQUEST_ID, W.ALERT_CODE, W.PAYLOAD, " +
+        "W.RETRY_COUNT, W.MAX_RETRY " +
+        "FROM WHATSAPP_WORKFLOW W " +
+        "WHERE W.ROWID IN ( " +
+        "    SELECT RID FROM ( " +
+        "        SELECT ROWID AS RID " +
+        "        FROM WHATSAPP_WORKFLOW " +
+        "        WHERE STATUS = ? " +
+        "        AND RETRY_COUNT < MAX_RETRY " +
+        "        AND NEXT_RETRY_AT <= SYSTIMESTAMP " +
+        "        ORDER BY NEXT_RETRY_AT ASC " +
+        "    ) WHERE ROWNUM <= ? " +
+        ") " +
+        "ORDER BY W.NEXT_RETRY_AT ASC " +
+        "FOR UPDATE OF W.STATUS SKIP LOCKED";
+
+// ─────────────────────────────────────────
+// UPDATE IN_PROGRESS query
+// ─────────────────────────────────────────
+private final static String updateInProgressWhatsAppWorkflow =
+        "UPDATE WHATSAPP_WORKFLOW " +
+        "SET STATUS = ?, " +
+        "    LAST_UPDATED_AT = SYSTIMESTAMP " +
+        "WHERE ORIGINAL_REQUEST_ID = ?";
+
+// ─────────────────────────────────────────
+// RESET STUCK IN_PROGRESS records query
+// Records stuck as I for more than 30 minutes
+// reset back to F so they get retried again
+// ─────────────────────────────────────────
+private final static String resetStuckInProgressRecords =
+        "UPDATE WHATSAPP_WORKFLOW " +
+        "SET STATUS = 'F', " +
+        "    NEXT_RETRY_AT = SYSTIMESTAMP, " +
+        "    LAST_UPDATED_AT = SYSTIMESTAMP " +
+        "WHERE STATUS = 'I' " +
+        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - 30/(24*60)";
+
+
+// ─────────────────────────────────────────
+// UPDATED FETCH METHOD
+// Fetches F records, marks them I, commits
+// ─────────────────────────────────────────
+public static List<Map<String, Object>> fetchRetryRecodrsWhatsAppWorkflow() {
+
+    Connection conn = null;
+    PreparedStatement fetchStmt = null;
+    PreparedStatement updateStmt = null;
+    ResultSet rSet = null;
+
+    try {
+        int batchSize = NE_WhatsAppRetryLauncher.whatsappRetryBatchSize;
+
+        conn = ConnectionManager.getConnection();
+
+        // Step 1 — Fetch F records with lock
+        fetchStmt = conn.prepareStatement(fetchRetryRecordsWhatsAppWorkflow);
+        fetchStmt.setObject(1, "F");
+        fetchStmt.setInt(2, batchSize);
+        rSet = fetchStmt.executeQuery();
+
+        List<Map<String, Object>> records = new ArrayList<>();
+        List<String> originalRRNs = new ArrayList<>();
+
+        while (rSet.next()) {
+            Map<String, Object> row = new HashMap<>();
+            row.put("ORIGINAL_RRN", rSet.getString("ORIGINAL_REQUEST_ID"));
+            row.put("ALERT_CODE",   rSet.getString("ALERT_CODE"));
+            row.put("PAYLOAD",      rSet.getString("PAYLOAD"));
+            row.put("RETRY_COUNT",  rSet.getString("RETRY_COUNT"));
+            row.put("MAX_RETRY",    rSet.getString("MAX_RETRY"));
+            records.add(row);
+            originalRRNs.add(rSet.getString("ORIGINAL_REQUEST_ID"));
+        }
+
+        // Step 2 — Mark all fetched records as IN_PROGRESS
+        // Same connection — FOR UPDATE lock still held
+        if (!originalRRNs.isEmpty()) {
+            updateStmt = conn.prepareStatement(updateInProgressWhatsAppWorkflow);
+            for (String rrn : originalRRNs) {
+                updateStmt.setObject(1, "I");
+                updateStmt.setString(2, rrn);
+                updateStmt.addBatch();
+            }
+            updateStmt.executeBatch();
+        }
+
+        // Step 3 — Commit — FOR UPDATE lock released
+        // Records now I — other instances skip them
+        conn.commit();
+
+        log.info("Fetched and marked " + records.size()
+                + " records as IN_PROGRESS.");
+        return records;
+
+    } catch (Exception e) {
+        log.error("fetchRetryRecodrsWhatsAppWorkflow failed: " + e.getMessage());
+        e.printStackTrace();
+    } finally {
+        try {
+            ConnectionManager.closeResultSet(rSet);
+            ConnectionManager.closeStatement(fetchStmt);
+            ConnectionManager.closeStatement(updateStmt);
+            ConnectionManager.closeConnection(conn);
+        } catch (Exception q) {
+            log.error("DB Connection could not be released: " + q.getMessage());
+        }
+    }
+
+    return new ArrayList<>();
+}
+
+
+// ─────────────────────────────────────────
+// RESET STUCK IN_PROGRESS METHOD
+// Called at start of every scheduler run
+// ─────────────────────────────────────────
+public static void resetStuckInProgressRecords() {
+
+    Connection conn = null;
+    PreparedStatement pstmt = null;
+
+    try {
+        conn = ConnectionManager.getConnection();
+        pstmt = conn.prepareStatement(resetStuckInProgressRecords);
+        int rows = pstmt.executeUpdate();
+        conn.commit();
+
+        if (rows > 0) {
+            log.warn("Reset " + rows
+                    + " stuck IN_PROGRESS records back to FAILED.");
+        }
+
+    } catch (Exception e) {
+        log.error("resetStuckInProgressRecords failed: " + e.getMessage());
+        e.printStackTrace();
+    } finally {
+        try {
+            ConnectionManager.closeStatement(pstmt);
+            ConnectionManager.closeConnection(conn);
+        } catch (Exception q) {
+            log.error("DB Connection could not be released: " + q.getMessage());
+        }
+    }
+
+
+
+
+                
+            }
+
+
+
+
+
+
+@Override
+public void run() {
+    log.info("WhatsApp retry scheduler triggered.");
+
+    // Step 1 — Reset any stuck IN_PROGRESS records first
+    // If JAR crashed previously — those I records get reset to F
+    WhatsAppManager.resetStuckInProgressRecords();
+
+    // Step 2 — Fetch FAILED records — marks them I automatically
+    List<Map<String, Object>> retryRecords =
+            WhatsAppManager.fetchRetryRecodrsWhatsAppWorkflow();
+
+    log.info("Records found for retry: " + retryRecords.size());
+
+    if (retryRecords == null || retryRecords.isEmpty()) {
+        log.info("No records to retry. Exiting.");
+        return;
+    }
+
+    Gson gson = new Gson();
+
+    for (Map<String, Object> record : retryRecords) {
+
+        String originalRRN = (String) record.get("ORIGINAL_RRN");
+        String payloadJson  = (String) record.get("PAYLOAD");
+        int retryCount      = Integer.parseInt(record.get("RETRY_COUNT").toString());
+        int maxRetry        = Integer.parseInt(record.get("MAX_RETRY").toString());
+        int attemptNumber   = retryCount + 1;
+
+        log.info("Retrying. ORIGINAL_RRN=" + originalRRN
+                + " attempt=" + attemptNumber);
+
+        Map<String, Object> datamap = gson.fromJson(payloadJson,
+                new TypeToken<Map<String, Object>>() {}.getType());
+
+        String newRRN = Notification_Utility.generateReferenceNumber(
+                NE_WhatsAppQLauncher.inputSourceId);
+
+        try {
+            String key = RandomStringUtils.randomAlphanumeric(32);
+            String encryptedData = Notification_Utility
+                    .prepareEncryptedEisJsonReqforWhatsApp(
+                            datamap, key,
+                            NE_WhatsAppRetryLauncher.inputSourceId,
+                            newRRN);
+
+            String eisUrl = NE_WhatsAppRetryLauncher.eisWhatsAppDns
+                    + NE_WhatsAppRetryLauncher.eisWhatsAppUrl;
+
+            Map<String, Object> apiRespMap =
+                    ApiClientWhatsApp.callEISApi(encryptedData, eisUrl, key);
+
+            log.info("ORIGINAL_RRN=" + originalRRN
+                    + " Full API Response: " + apiRespMap);
+
+            // Check EIS level error first
+            String eisErrorCode = (String) apiRespMap.get("ERROR_CODE");
+
+            if (eisErrorCode != null && !eisErrorCode.isEmpty()) {
+                String eisErrorDesc = (String) apiRespMap.get("ERROR_DESCRIPTION");
+
+                if (Notification_Utility.isRetryableEisErrorCode(eisErrorCode)) {
+                    handleFailure(originalRRN, newRRN, attemptNumber,
+                            retryCount, maxRetry,
+                            "EIS_ERR | " + eisErrorCode, eisErrorDesc);
+                } else {
+                    // Non-retryable — DLQ directly
+                    WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                            originalRRN,
+                            "EIS_ERR | " + eisErrorCode, eisErrorDesc);
+                    WhatsAppManager.insertAuditWhatsAppWorkflow(
+                            originalRRN, newRRN, attemptNumber,
+                            "D", "EIS_ERR | " + eisErrorCode, eisErrorDesc);
+                    log.warn("Non-retryable EIS error. DLQ. ORIGINAL_RRN="
+                            + originalRRN);
+                }
+                continue;
+            }
+
+            // Check WhatsApp level
+            Map<String, Object> eisResponse =
+                    (Map<String, Object>) apiRespMap.get("EIS_RESPONSE");
+            String statusCode       = (String) eisResponse.get("STATUS_CODE");
+            String errorDescription = (String) eisResponse.get("DESCRIPTION");
+
+            if ("00".equals(statusCode)) {
+                // SUCCESS
+                WhatsAppManager.updateSuccessFlagWhatsAppWorkflow(originalRRN);
+                WhatsAppManager.insertAuditWhatsAppWorkflow(
+                        originalRRN, newRRN, attemptNumber, "V", null, null);
+                log.info("Retry SUCCESS. ORIGINAL_RRN=" + originalRRN);
+
+            } else {
+                if (Notification_Utility.isRetryableWhatsAppErrorCode(statusCode)) {
+                    handleFailure(originalRRN, newRRN, attemptNumber,
+                            retryCount, maxRetry,
+                            "WA_ERR | " + statusCode, errorDescription);
+                } else {
+                    // Non-retryable — DLQ directly
+                    WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                            originalRRN,
+                            "WA_ERR | " + statusCode, errorDescription);
+                    WhatsAppManager.insertAuditWhatsAppWorkflow(
+                            originalRRN, newRRN, attemptNumber,
+                            "D", "WA_ERR | " + statusCode, errorDescription);
+                    log.warn("Non-retryable WhatsApp error. DLQ. ORIGINAL_RRN="
+                            + originalRRN);
+                }
+            }
+
+        } catch (Exception e) {
+            log.error("Retry exception. ORIGINAL_RRN=" + originalRRN
+                    + " : " + e.getMessage(), e);
+            handleFailure(originalRRN, newRRN, attemptNumber,
+                    retryCount, maxRetry,
+                    "EXCEPTION", e.getMessage());
+        }
+    }
+}
+
+
+private void handleFailure(String originalRrn, String currentRequestId,
+                            int attemptNumber, int retryCount,
+                            int maxRetry, String errorCode, String errorDetail) {
+    try {
+        WhatsAppManager.insertAuditWhatsAppWorkflow(
+                originalRrn, currentRequestId,
+                attemptNumber, "F", errorCode, errorDetail);
+
+        if ((retryCount + 1) >= maxRetry) {
+            // Increment RETRY_COUNT first
+            WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                    originalRrn, errorCode,
+                    errorDetail, retryIntervalMinutes);
+            // Then DLQ
+            WhatsAppManager.updateDlqFlagWhatsAppWorkflow(
+                    originalRrn, errorCode, errorDetail);
+            log.warn("Max retries exhausted. DLQ. ORIGINAL_RRN=" + originalRrn);
+
+        } else {
+            // Back to F — increment RETRY_COUNT
+            WhatsAppManager.updateFailFlagWhatsAppWorkflow(
+                    originalRrn, errorCode,
+                    errorDetail, retryIntervalMinutes);
+            log.warn("Retry failed. Will retry again. ORIGINAL_RRN=" + originalRrn
+                    + " remaining=" + (maxRetry - retryCount - 1));
+        }
+
+    } catch (Exception e) {
+        log.error("handleFailure error. ORIGINAL_RRN=" + originalRrn
+                + " : " + e.getMessage(), e);
+    }
+    }
+
+        
