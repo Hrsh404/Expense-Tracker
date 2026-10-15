@@ -150,4 +150,248 @@ public void run() {
     // rest of processing...
 }
 
+
+
+
+
+
+
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.security.KeyManagementException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.util.HashMap;
+import java.util.Map;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
+
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.params.HttpConnectionParams;
+import org.apache.http.params.HttpParams;
+import org.apache.http.util.EntityUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import com.tcs.cbslite.notifications.constants.NeConstants;
+import com.tcs.cbslite.notifications.launcher.NE_WhatsAppQLauncher;
+import com.tcs.cbslite.notifications.logger.NePropertyFileReader;
+import com.tcs.cbslite.notifications.util.AESdecrypt;
+
+public class ApiClientWhatsApp {
+
+private static final Logger log =
+        LogManager.getLogger(NE_WhatsAppQLauncher.class);
+
+public static final String URL =
+        NePropertyFileReader.getPropertyKeyValue(
+                NeConstants.NE_PROPERTY_FILENAME.toString(),
+                "KEYSTORE_PATH");
+
+public static final String CERTIFICATEPATH =
+        NePropertyFileReader.getPropertyKeyValue(
+                NeConstants.NE_PROPERTY_FILENAME.toString(),
+                "EIS_CERTPUB_PATH");
+
+public static final String IV =
+        NePropertyFileReader.getPropertyKeyValue(
+                NeConstants.NE_PROPERTY_FILENAME.toString(),
+                NeConstants.PIV.toString());
+
+public static final String KEY =
+        NePropertyFileReader.getPropertyKeyValue(
+                NeConstants.NE_PROPERTY_FILENAME.toString(),
+                NeConstants.PSALT.toString());
+
+private static String decryptedCertPath = null;
+
+// Timeout configurations
+private static final int CONNECTION_TIMEOUT = 10000; // 10 seconds
+private static final int READ_TIMEOUT = 30000;       // 30 seconds
+
+public static Map<String, Object> callEISApi(
+        String request, String EISURL, String key) {
+
+    Map<String, Object> apiResponseMap = new HashMap<>();
+
+    EISRespBean eisRespBean = new EISRespBean();
+    Gson gson = new Gson();
+    String response = "";
+
+    try {
+        log.info("EIS Certificate Path: " + CERTIFICATEPATH);
+        log.info("API call: sending data to WhatsApp via EIS");
+
+        AESdecrypt aeSdecrypt = new AESdecrypt();
+
+        String decryptedData = null;
+
+        try {
+            decryptedData = aeSdecrypt.aesDecrypt(KEY, IV, URL);
+            decryptedCertPath =
+                    aeSdecrypt.aesDecrypt(KEY, IV, CERTIFICATEPATH);
+
+        } catch (UnsupportedEncodingException e) {
+            log.error("Error decrypting certificate configuration", e);
+            throw e;
+        }
+
+        System.setProperty("javax.net.ssl.trustStore", decryptedData);
+        System.setProperty("javax.net.ssl.trustStorePassword", "changeit");
+        System.setProperty("javax.net.ssl.trustStoreType", "JKS");
+        System.setProperty(
+                "sun.security.ssl.allowUnsafeRenegotiation", "true");
+
+        KeyStore objKeyStoreServer = KeyStore.getInstance("JKS");
+
+        try (FileInputStream fis = new FileInputStream(decryptedData)) {
+            objKeyStoreServer.load(fis, "changeit".toCharArray());
+        }
+
+        objKeyStoreServer.getCertificate(
+                NE_WhatsAppQLauncher.certAlias);
+
+        TrustManagerFactory objFactory =
+                TrustManagerFactory.getInstance(
+                        TrustManagerFactory.getDefaultAlgorithm());
+
+        objFactory.init(objKeyStoreServer);
+
+        SSLContext objSslContext = SSLContext.getInstance("TLSv1.2");
+
+        SecureRandom objSecureRandom = new SecureRandom();
+
+        objSslContext.init(
+                null,
+                objFactory.getTrustManagers(),
+                objSecureRandom);
+
+        SSLSocketFactory objSslSocketFactory =
+                objSslContext.getSocketFactory();
+
+        X509TrustManager o_X509TrustManager =
+                (X509TrustManager) objFactory.getTrustManagers()[0];
+
+        javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier(
+                new javax.net.ssl.HostnameVerifier() {
+                    @Override
+                    public boolean verify(
+                            String hostname,
+                            javax.net.ssl.SSLSession sslSession) {
+
+                        return hostname.equals(
+                                NE_WhatsAppQLauncher.api_hostname);
+                    }
+                });
+
+        String accessToken =
+                AESdecrypt.RSAEncrypt(key, decryptedCertPath);
+
+        log.debug(
+                "Certificate : " + decryptedCertPath
+                + " || Key ::: " + key
+                + " || AccessToken : " + accessToken);
+
+        // Create HTTP client
+        HttpClient httpClient = new DefaultHttpClient();
+
+        // Configure connection and read timeouts
+        HttpParams httpParams = httpClient.getParams();
+
+        HttpConnectionParams.setConnectionTimeout(
+                httpParams, CONNECTION_TIMEOUT);
+
+        HttpConnectionParams.setSoTimeout(
+                httpParams, READ_TIMEOUT);
+
+        // Prepare HTTP POST request
+        HttpPost post = new HttpPost(EISURL);
+
+        StringEntity postingString = new StringEntity(request);
+
+        post.setEntity(postingString);
+        post.setHeader("Content-type", "application/json");
+        post.setHeader("AccessToken", accessToken);
+
+        log.info(
+                "Calling EIS API with connection timeout: "
+                + CONNECTION_TIMEOUT + " ms and read timeout: "
+                + READ_TIMEOUT + " ms");
+
+        // Execute request
+        HttpResponse eISresponse = httpClient.execute(post);
+
+        HttpEntity entity = eISresponse.getEntity();
+
+        String eisResponse = entity != null
+                ? EntityUtils.toString(entity)
+                : null;
+
+        if (eisResponse == null || eisResponse.trim().isEmpty()) {
+
+            log.info("Incorrect response from EIS: " + eisResponse);
+
+        } else {
+
+            log.info("Encrypted response from EIS: " + eisResponse);
+
+            ObjectMapper mapper2 = new ObjectMapper();
+
+            mapper2.setPropertyNamingStrategy(new UpperClass());
+
+            eisRespBean = mapper2.readValue(
+                    eisResponse, EISRespBean.class);
+
+            response = AESdecrypt.RSADecryptgcm(
+                    eisRespBean.getRESPONSE(), key);
+
+            log.info("Decrypted Response from EIS: " + response);
+
+            apiResponseMap = gson.fromJson(
+                    response,
+                    new TypeToken<Map<String, Object>>() {}.getType());
+        }
+
+        // Release the HTTP connection
+        post.releaseConnection();
+
+    } catch (Exception e) {
+
+        apiResponseMap.put("RESPONSE_STATUS", "1");
+        apiResponseMap.put("ERROR_CODE", "9999");
+        apiResponseMap.put(
+                "ERROR_DESCRIPTION",
+                "UNABLE TO PROCESS. PLEASE TRY AGAIN.");
+
+        log.error("Error after hitting EIS API", e);
+
+    }
+
+    return apiResponseMap;
+}
+
+}
+
+
+
+
+
+      
             
