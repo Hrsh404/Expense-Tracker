@@ -131,3 +131,136 @@ public static Map<String, Object> callEISApi(String request, String EISURL, Stri
 
     return apiResponseMap;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+                        private final static String fetchStuckRecords =
+        "SELECT ORIGINAL_REQUEST_ID, RETRY_COUNT, MAX_RETRY " +
+        "FROM WHATSAPP_WORKFLOW " +
+        "WHERE STATUS = 'I' " +
+        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - ? / (24*60) " +
+        "ORDER BY LAST_UPDATED_AT ASC";
+
+private final static String atomicClaimStuckRecord =
+        "UPDATE WHATSAPP_WORKFLOW " +
+        "SET STATUS = CASE " +
+        "    WHEN RETRY_COUNT >= MAX_RETRY THEN 'D' " +
+        "    ELSE 'F' " +
+        "END, " +
+        "CLAIMED_BY = ?, " +
+        "NEXT_RETRY_AT = SYSTIMESTAMP + ? / (24*60), " +
+        "LAST_UPDATED_AT = SYSTIMESTAMP " +
+        "WHERE ORIGINAL_REQUEST_ID = ? " +
+        "AND STATUS = 'I' " +           // ← atomic — only updates if still I
+        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - ? / (24*60)";
+
+
+
+public static void resetStuckInProgressRecords() {
+
+    Connection conn = null;
+    PreparedStatement fetchStmt = null;
+    PreparedStatement claimStmt = null;
+    ResultSet rSet = null;
+
+    String instanceId = getInstanceId();
+
+    try {
+        conn = ConnectionManager.getConnection();
+
+        // Step 1 — Fetch stuck I records
+        fetchStmt = conn.prepareStatement(fetchStuckRecords);
+        fetchStmt.setInt(1, NE_WhatsAppRetryLauncher.stuckRecordThresholdMinutes);
+        rSet = fetchStmt.executeQuery();
+
+        List<String> stuckRRNs = new ArrayList<>();
+        while (rSet.next()) {
+            stuckRRNs.add(rSet.getString("ORIGINAL_REQUEST_ID"));
+        }
+
+        conn.commit();
+
+        if (stuckRRNs.isEmpty()) {
+            return;
+        }
+
+        logger.info("Found " + stuckRRNs.size() + " stuck I records. Attempting atomic claim.");
+
+        // Step 2 — Atomically claim each record
+        int claimed = 0;
+        int skipped = 0;
+
+        for (String rrn : stuckRRNs) {
+            try {
+                claimStmt = conn.prepareStatement(atomicClaimStuckRecord);
+                claimStmt.setString(1, instanceId);         // CLAIMED_BY
+                claimStmt.setInt(2, NE_WhatsAppRetryLauncher.retryIntervalMinutes); // NEXT_RETRY_AT
+                claimStmt.setString(3, rrn);                // ORIGINAL_REQUEST_ID
+                claimStmt.setInt(4, NE_WhatsAppRetryLauncher.stuckRecordThresholdMinutes);
+
+                int rowsUpdated = claimStmt.executeUpdate();
+                conn.commit();
+
+                if (rowsUpdated > 0) {
+                    // This instance claimed it
+                    claimed++;
+                    logger.info("Claimed stuck record. RRN=" + rrn
+                            + " instanceId=" + instanceId);
+                } else {
+                    // Another instance already claimed it
+                    skipped++;
+                    logger.info("Record already claimed by another instance. RRN=" + rrn);
+                }
+
+            } catch (Exception e) {
+                logger.error("Failed to claim record. RRN=" + rrn
+                        + " : " + e.getMessage());
+            } finally {
+                ConnectionManager.closeStatement(claimStmt);
+                claimStmt = null;
+            }
+        }
+
+        logger.warn("Atomic claim complete. Claimed=" + claimed
+                + " Skipped=" + skipped
+                + " instanceId=" + instanceId);
+
+    } catch (Exception e) {
+        logger.error("resetStuckInProgressRecords failed: " + e.getMessage());
+        e.printStackTrace();
+    } finally {
+        try {
+            ConnectionManager.closeResultSet(rSet);
+            ConnectionManager.closeStatement(fetchStmt);
+            ConnectionManager.closeStatement(claimStmt);
+            ConnectionManager.closeConnection(conn);
+        } catch (Exception q) {
+            logger.error("DB Connection could not be released: " + q.getMessage());
+        }
+    }
+}
+
+private static String getInstanceId() {
+    try {
+        return java.net.InetAddress.getLocalHost().getHostName()
+                + "_" + Thread.currentThread().getName();
+    } catch (Exception e) {
+        return "UNKNOWN_" + System.currentTimeMillis();
+    }
+}
+
+
+
+
+
+            
