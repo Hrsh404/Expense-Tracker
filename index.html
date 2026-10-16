@@ -261,6 +261,23 @@ private static String getInstanceId() {
 
 
 
+private final static String resetStuckInProgressRecords =
+        "UPDATE WHATSAPP_WORKFLOW " +
+        "SET STATUS = CASE " +
+        "    WHEN RETRY_COUNT >= MAX_RETRY THEN 'D' " +
+        "    ELSE 'F' " +
+        "END, " +
+        "NEXT_RETRY_AT = SYSTIMESTAMP + ? / (24*60), " +
+        "LAST_UPDATED_AT = SYSTIMESTAMP " +
+        "WHERE STATUS = 'I' " +
+        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - ? / (24*60)";
+
+
+
+
+            
+
+
 
 
             
