@@ -1,35 +1,51 @@
+package com.sbi.ittss.swift.client.service;
 
+import java.util.List;
 
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
+public class ResponseServiceDebug {
 
+    public static void main(String[] args) {
 
-            
+        AnnotationConfigApplicationContext context =
+                new AnnotationConfigApplicationContext();
 
-CREATE TABLE WHATSAPP_WORKFLOW (
-    ID NUMBER UNIQUE,
-    ORIGINAL_REQUEST_ID VARCHAR2(50),
-    ALERT_CODE VARCHAR2(20),
-    PAYLOAD CLOB,
-    STATUS VARCHAR2(20),
-    RETRY_COUNT NUMBER DEFAULT 0,
-    MAX_RETRY NUMBER DEFAULT 3,
-    NEXT_RETRY_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP,
-    CREATED_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP,
-    LAST_UPDATED_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP,
-    ERROR_CODE VARCHAR2(20),
-    ERROR_DETAIL VARCHAR2(200),
-    CLAIMED_BY VARCHAR2(100)
-);
+        context.scan("com.sbi.ittss");
+        context.refresh();
 
-CREATE SEQUENCE WHATSAPP_WORKFLOW_SEQUENCE
-    START WITH 1
-    INCREMENT BY 1;
+        try {
+            ResponseService responseService =
+                    context.getBean(ResponseService.class);
 
-CREATE INDEX IDX_WHATSAPP_STATUS
-    ON WHATSAPP_WORKFLOW(STATUS);
+            System.out.println("Starting CSIG response processing...");
 
-CREATE INDEX IDX_WHATSAPP_NEXT_RETRY
-    ON WHATSAPP_WORKFLOW(NEXT_RETRY_AT, STATUS);
+            List<CsigResponse> responses =
+                    responseService.processAllCsigResponses();
 
+            System.out.println("Processing completed.");
 
-            
+            if (responses != null) {
+                System.out.println(
+                        "Responses processed: " + responses.size());
+
+                for (int i = 0; i < responses.size(); i++) {
+                    CsigResponse response = responses.get(i);
+
+                    System.out.println(
+                            "Response " + (i + 1)
+                            + " | MUR: " + response.getMurCode()
+                            + " | Code: " + response.getResponseCode());
+                }
+            } else {
+                System.out.println("Returned response list is null.");
+            }
+
+        } catch (Exception e) {
+            System.err.println("Processing failed!");
+            e.printStackTrace();
+        } finally {
+            context.close();
+        }
+    }
+}
