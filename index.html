@@ -1,283 +1,35 @@
-public static Map<String, Object> callEISApi(String request, String EISURL, String key) {
-    Map<String, Object> apiResponseMap = new HashMap<>();
-    EISRespBean eisRespBean = new EISRespBean();
-    Gson gson = new Gson();
-    String response = "";
 
-    try {
-        log.info("EIS Certificate Path: " + CERTIFICATEPATH);
-        log.info("API call: sending data to WhatsApp via EIS");
-
-        AESdecrypt aeSdecrypt = new AESdecrypt();
-        String decryptedData = null;
-        try {
-            decryptedData = aeSdecrypt.aesDecrypt(KEY, IV, URL);
-            decryptedCertPath = aeSdecrypt.aesDecrypt(KEY, IV, CERTIFICATEPATH);
-        } catch (UnsupportedEncodingException e2) {
-            log.error("Decryption failed: " + e2.getMessage());
-        }
-
-        System.setProperty("javax.net.ssl.trustStore", decryptedData);
-        System.setProperty("javax.net.ssl.trustStorePassword", "changeit");
-        System.setProperty("javax.net.ssl.trustStoreType", "JKS");
-        System.setProperty("sun.security.ssl.allowUnsafeRenegotiation", "true");
-
-        KeyStore objKeyStoreServer = null;
-        TrustManagerFactory objFactory = null;
-        SSLContext objSslContext = null;
-        SSLSocketFactory objSslSocketFactory;
-        SecureRandom objSecureRandom = new SecureRandom();
-
-        try {
-            objKeyStoreServer = KeyStore.getInstance("JKS");
-        } catch (KeyStoreException e1) {
-            log.info(e1.getMessage());
-        }
-        try {
-            try {
-                objKeyStoreServer.load(new FileInputStream(decryptedData),
-                        "changeit".toCharArray());
-            } catch (NoSuchAlgorithmException | IOException e) {
-                log.info(e.getMessage());
-            }
-            objKeyStoreServer.getCertificate(NE_WhatsAppQLauncher.certAlias);
-        } catch (CertificateException e) {
-            log.info(e.getMessage());
-        } catch (KeyStoreException e) {
-            log.info(e.getMessage());
-        }
-        try {
-            objFactory = TrustManagerFactory.getInstance(
-                    TrustManagerFactory.getDefaultAlgorithm());
-        } catch (NoSuchAlgorithmException e1) {
-            log.info(e1.getMessage());
-        }
-        try {
-            objFactory.init(objKeyStoreServer);
-        } catch (KeyStoreException e) {
-            log.info(e.getMessage());
-        }
-        try {
-            objSslContext = SSLContext.getInstance("TLSv1.2");
-        } catch (NoSuchAlgorithmException e) {
-            log.info(e.getMessage());
-        }
-        try {
-            objSslContext.init(null, objFactory.getTrustManagers(), objSecureRandom);
-        } catch (final KeyManagementException e) {
-            log.info(e.getMessage());
-        }
-        objSslSocketFactory = objSslContext.getSocketFactory();
-        X509TrustManager o_X509TrustManager =
-                (X509TrustManager) objFactory.getTrustManagers()[0];
-
-        javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier(
-                new javax.net.ssl.HostnameVerifier() {
-                    public boolean verify(String hostname,
-                                          javax.net.ssl.SSLSession sslSession) {
-                        return hostname.equals(NE_WhatsAppQLauncher.api_hostname);
-                    }
-                });
-
-        String accessToken = AESdecrypt.RSAEncrypt(key, decryptedCertPath);
-        log.debug("Certificate: " + decryptedCertPath
-                + " || Key: " + key
-                + " || AccessToken: " + accessToken);
-
-        // ✅ Add timeout parameters
-        HttpParams httpParams = new BasicHttpParams();
-        HttpConnectionParams.setConnectionTimeout(httpParams,
-                NE_WhatsAppQLauncher.eisConnectTimeoutMs);  // connect timeout
-        HttpConnectionParams.setSoTimeout(httpParams,
-                NE_WhatsAppQLauncher.eisReadTimeoutMs);      // read timeout
-
-        HttpClient httpClient = new DefaultHttpClient(httpParams);  // ← pass params
-
-        HttpPost post = new HttpPost(EISURL);
-        StringEntity postingString = new StringEntity(request);
-        post.setEntity(postingString);
-        post.setHeader("Content-type", "application/json");
-        post.setHeader("AccessToken", accessToken);
-
-        log.info("Calling EIS API. URL=" + EISURL
-                + " ConnectTimeout=" + NE_WhatsAppQLauncher.eisConnectTimeoutMs + "ms"
-                + " ReadTimeout=" + NE_WhatsAppQLauncher.eisReadTimeoutMs + "ms");
-
-        HttpResponse eISresponse = httpClient.execute(post);
-        HttpEntity entity = eISresponse.getEntity();
-        String eisResponse = EntityUtils.toString(entity);
-
-        if (eisResponse == null || eisResponse.equals("")) {
-            log.info("Incorrect response from EIS: " + eisResponse);
-        } else {
-            log.info("Encrypted response from EIS: " + eisResponse);
-            ObjectMapper mapper2 = new ObjectMapper();
-            mapper2.setPropertyNamingStrategy(new UpperClass());
-            eisRespBean = mapper2.readValue(eisResponse, EISRespBean.class);
-            response = AESdecrypt.RSADecryptgcm(eisRespBean.getRESPONSE(), key);
-            log.info("Decrypted Response from EIS: " + response);
-            apiResponseMap = gson.fromJson(response,
-                    new TypeToken<Map<String, Object>>() {}.getType());
-        }
-
-    } catch (Exception e) {
-        // Timeout or any exception — caught here
-        // handleFailure will be called by caller
-        apiResponseMap.put("RESPONSE_STATUS", "1");
-        apiResponseMap.put("ERROR_CODE", "9999");
-        apiResponseMap.put("ERROR_DESCRIPTION", "UNABLE TO PROCESS. PLEASE TRY AGAIN.");
-        log.error("ERROR after hitting EIS: " + e.getMessage(), e);
-    }
-
-    return apiResponseMap;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-                        private final static String fetchStuckRecords =
-        "SELECT ORIGINAL_REQUEST_ID, RETRY_COUNT, MAX_RETRY " +
-        "FROM WHATSAPP_WORKFLOW " +
-        "WHERE STATUS = 'I' " +
-        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - ? / (24*60) " +
-        "ORDER BY LAST_UPDATED_AT ASC";
-
-private final static String atomicClaimStuckRecord =
-        "UPDATE WHATSAPP_WORKFLOW " +
-        "SET STATUS = CASE " +
-        "    WHEN RETRY_COUNT >= MAX_RETRY THEN 'D' " +
-        "    ELSE 'F' " +
-        "END, " +
-        "CLAIMED_BY = ?, " +
-        "NEXT_RETRY_AT = SYSTIMESTAMP + ? / (24*60), " +
-        "LAST_UPDATED_AT = SYSTIMESTAMP " +
-        "WHERE ORIGINAL_REQUEST_ID = ? " +
-        "AND STATUS = 'I' " +           // ← atomic — only updates if still I
-        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - ? / (24*60)";
-
-
-
-public static void resetStuckInProgressRecords() {
-
-    Connection conn = null;
-    PreparedStatement fetchStmt = null;
-    PreparedStatement claimStmt = null;
-    ResultSet rSet = null;
-
-    String instanceId = getInstanceId();
-
-    try {
-        conn = ConnectionManager.getConnection();
-
-        // Step 1 — Fetch stuck I records
-        fetchStmt = conn.prepareStatement(fetchStuckRecords);
-        fetchStmt.setInt(1, NE_WhatsAppRetryLauncher.stuckRecordThresholdMinutes);
-        rSet = fetchStmt.executeQuery();
-
-        List<String> stuckRRNs = new ArrayList<>();
-        while (rSet.next()) {
-            stuckRRNs.add(rSet.getString("ORIGINAL_REQUEST_ID"));
-        }
-
-        conn.commit();
-
-        if (stuckRRNs.isEmpty()) {
-            return;
-        }
-
-        logger.info("Found " + stuckRRNs.size() + " stuck I records. Attempting atomic claim.");
-
-        // Step 2 — Atomically claim each record
-        int claimed = 0;
-        int skipped = 0;
-
-        for (String rrn : stuckRRNs) {
-            try {
-                claimStmt = conn.prepareStatement(atomicClaimStuckRecord);
-                claimStmt.setString(1, instanceId);         // CLAIMED_BY
-                claimStmt.setInt(2, NE_WhatsAppRetryLauncher.retryIntervalMinutes); // NEXT_RETRY_AT
-                claimStmt.setString(3, rrn);                // ORIGINAL_REQUEST_ID
-                claimStmt.setInt(4, NE_WhatsAppRetryLauncher.stuckRecordThresholdMinutes);
-
-                int rowsUpdated = claimStmt.executeUpdate();
-                conn.commit();
-
-                if (rowsUpdated > 0) {
-                    // This instance claimed it
-                    claimed++;
-                    logger.info("Claimed stuck record. RRN=" + rrn
-                            + " instanceId=" + instanceId);
-                } else {
-                    // Another instance already claimed it
-                    skipped++;
-                    logger.info("Record already claimed by another instance. RRN=" + rrn);
-                }
-
-            } catch (Exception e) {
-                logger.error("Failed to claim record. RRN=" + rrn
-                        + " : " + e.getMessage());
-            } finally {
-                ConnectionManager.closeStatement(claimStmt);
-                claimStmt = null;
-            }
-        }
-
-        logger.warn("Atomic claim complete. Claimed=" + claimed
-                + " Skipped=" + skipped
-                + " instanceId=" + instanceId);
-
-    } catch (Exception e) {
-        logger.error("resetStuckInProgressRecords failed: " + e.getMessage());
-        e.printStackTrace();
-    } finally {
-        try {
-            ConnectionManager.closeResultSet(rSet);
-            ConnectionManager.closeStatement(fetchStmt);
-            ConnectionManager.closeStatement(claimStmt);
-            ConnectionManager.closeConnection(conn);
-        } catch (Exception q) {
-            logger.error("DB Connection could not be released: " + q.getMessage());
-        }
-    }
-}
-
-private static String getInstanceId() {
-    try {
-        return java.net.InetAddress.getLocalHost().getHostName()
-                + "_" + Thread.currentThread().getName();
-    } catch (Exception e) {
-        return "UNKNOWN_" + System.currentTimeMillis();
-    }
-}
-
-
-
-private final static String resetStuckInProgressRecords =
-        "UPDATE WHATSAPP_WORKFLOW " +
-        "SET STATUS = CASE " +
-        "    WHEN RETRY_COUNT >= MAX_RETRY THEN 'D' " +
-        "    ELSE 'F' " +
-        "END, " +
-        "NEXT_RETRY_AT = SYSTIMESTAMP + ? / (24*60), " +
-        "LAST_UPDATED_AT = SYSTIMESTAMP " +
-        "WHERE STATUS = 'I' " +
-        "AND LAST_UPDATED_AT <= SYSTIMESTAMP - ? / (24*60)";
 
 
 
 
             
 
+CREATE TABLE WHATSAPP_WORKFLOW (
+    ID NUMBER UNIQUE,
+    ORIGINAL_REQUEST_ID VARCHAR2(50),
+    ALERT_CODE VARCHAR2(20),
+    PAYLOAD CLOB,
+    STATUS VARCHAR2(20),
+    RETRY_COUNT NUMBER DEFAULT 0,
+    MAX_RETRY NUMBER DEFAULT 3,
+    NEXT_RETRY_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP,
+    CREATED_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP,
+    LAST_UPDATED_AT TIMESTAMP(6) DEFAULT SYSTIMESTAMP,
+    ERROR_CODE VARCHAR2(20),
+    ERROR_DETAIL VARCHAR2(200),
+    CLAIMED_BY VARCHAR2(100)
+);
 
+CREATE SEQUENCE WHATSAPP_WORKFLOW_SEQUENCE
+    START WITH 1
+    INCREMENT BY 1;
+
+CREATE INDEX IDX_WHATSAPP_STATUS
+    ON WHATSAPP_WORKFLOW(STATUS);
+
+CREATE INDEX IDX_WHATSAPP_NEXT_RETRY
+    ON WHATSAPP_WORKFLOW(NEXT_RETRY_AT, STATUS);
 
 
             
