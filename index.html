@@ -1,1 +1,241 @@
 
+
+private static String cleanJavaCode(String code) {
+
+    // 1. Remove comments first
+    code = removeComments(code);
+
+    // 2. Add IllegalArgumentException only if the
+    // generic catch does not already have a preceding catch.
+    java.util.regex.Pattern pattern =
+        java.util.regex.Pattern.compile(
+            "(?s)(catch\\s*\\(\\s*([\\w.$]+)\\s+\\w+\\s*\\)" +
+            "\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*)?" +
+            "catch\\s*\\(\\s*Exception\\s+(\\w+)\\s*\\)"
+        );
+
+    java.util.regex.Matcher matcher = pattern.matcher(code);
+    StringBuffer result = new StringBuffer();
+
+    while (matcher.find()) {
+        String previousCatch = matcher.group(1);
+        String previousType = matcher.group(2);
+        String variable = matcher.group(3);
+
+        if (previousCatch == null
+                || "Exception".equals(previousType)
+                || "Throwable".equals(previousType)) {
+
+            matcher.appendReplacement(
+                result,
+                java.util.regex.Matcher.quoteReplacement(
+                    "catch (IllegalArgumentException e) {\n" +
+                    "    throw e;\n" +
+                    "} catch (Exception " + variable + ")"
+                )
+            );
+        } else {
+            matcher.appendReplacement(
+                result,
+                java.util.regex.Matcher.quoteReplacement(
+                    matcher.group()
+                )
+            );
+        }
+    }
+
+    matcher.appendTail(result);
+    code = result.toString();
+
+    // 3. Replace printStackTrace() with getMessage()
+    code = code.replaceAll(
+        "\\b(\\w+)\\.printStackTrace\\s*\\(\\s*\\)",
+        "$1.getMessage()"
+    );
+
+    // 4. Remove empty System.out.print/println statements
+    code = code.replaceAll(
+        "System\\s*\\.\\s*out\\s*\\.\\s*" +
+        "print(?:ln)?\\s*\\(\\s*(?:\"\\s*\")?\\s*\\)\\s*;",
+        ""
+    );
+
+    // 5. Remove unused regular and static imports
+    code = removeUnusedImports(code);
+
+    return code;
+}
+
+private static String removeUnusedImports(String code) {
+
+    java.util.regex.Pattern importPattern =
+        java.util.regex.Pattern.compile(
+            "(?m)^\\s*import\\s+(static\\s+)?" +
+            "([\\w.]+(?:\\.\\*)?)\\s*;[^\\S\\r\\n]*"
+        );
+
+    java.util.regex.Matcher matcher =
+        importPattern.matcher(code);
+
+    StringBuffer result = new StringBuffer();
+
+    while (matcher.find()) {
+
+        String staticPart = matcher.group(1);
+        String imported = matcher.group(2);
+
+        // Keep wildcard imports; usage cannot be determined
+        // reliably with this lightweight approach.
+        if (imported.endsWith(".*")) {
+            matcher.appendReplacement(
+                result,
+                java.util.regex.Matcher.quoteReplacement(
+                    matcher.group()
+                )
+            );
+            continue;
+        }
+
+        String simpleName = imported.substring(
+            imported.lastIndexOf('.') + 1
+        );
+
+        // For static imports, check the imported member name.
+        // For ordinary imports, check the class name.
+        String remaining = code.substring(0, matcher.start())
+                + code.substring(matcher.end());
+
+        java.util.regex.Pattern usagePattern =
+            java.util.regex.Pattern.compile(
+                "\\b" + java.util.regex.Pattern.quote(simpleName)
+                + "\\b"
+            );
+
+        boolean used = usagePattern.matcher(remaining).find();
+
+        if (!used) {
+            matcher.appendReplacement(result, "");
+        } else {
+            matcher.appendReplacement(
+                result,
+                java.util.regex.Matcher.quoteReplacement(
+                    matcher.group()
+                )
+            );
+        }
+    }
+
+    matcher.appendTail(result);
+    return result.toString();
+}
+
+
+
+
+
+
+private static String removeComments(String code) {
+
+    StringBuilder result = new StringBuilder();
+    int i = 0;
+    int length = code.length();
+
+    while (i < length) {
+
+        char c = code.charAt(i);
+
+        // Preserve strings
+        if (c == '"') {
+            result.append(c);
+            i++;
+
+            while (i < length) {
+                char ch = code.charAt(i++);
+                result.append(ch);
+
+                if (ch == '\\' && i < length) {
+                    result.append(code.charAt(i++));
+                } else if (ch == '"') {
+                    break;
+                }
+            }
+
+        // Preserve character literals
+        } else if (c == '\'') {
+            result.append(c);
+            i++;
+
+            while (i < length) {
+                char ch = code.charAt(i++);
+                result.append(ch);
+
+                if (ch == '\\' && i < length) {
+                    result.append(code.charAt(i++));
+                } else if (ch == '\'') {
+                    break;
+                }
+            }
+
+        // Single-line comment
+        } else if (c == '/' && i + 1 < length
+                && code.charAt(i + 1) == '/') {
+
+            int start = i;
+            i += 2;
+
+            while (i < length
+                    && code.charAt(i) != '\n'
+                    && code.charAt(i) != '\r') {
+                i++;
+            }
+
+            String comment = code.substring(start, i);
+
+            if (comment.matches("(?s).*\\bCR\\b.*")
+                    || comment.contains("IR ")) {
+                result.append(comment);
+            }
+
+        // Multiline comment or JavaDoc
+        } else if (c == '/' && i + 1 < length
+                && code.charAt(i + 1) == '*') {
+
+            int start = i;
+            i += 2;
+
+            while (i + 1 < length
+                    && !(code.charAt(i) == '*'
+                    && code.charAt(i + 1) == '/')) {
+                i++;
+            }
+
+            if (i + 1 < length) {
+                i += 2;
+            } else {
+                i = length;
+            }
+
+            String comment = code.substring(start, i);
+
+            if (comment.matches("(?s).*\\bCR\\b.*")
+                    || comment.contains("IR ")) {
+                result.append(comment);
+            } else {
+                // Preserve line breaks when removing comments
+                for (int j = 0; j < comment.length(); j++) {
+                    if (comment.charAt(j) == '\n'
+                            || comment.charAt(j) == '\r') {
+                        result.append(comment.charAt(j));
+                    }
+                }
+            }
+
+        } else {
+            result.append(c);
+            i++;
+        }
+    }
+
+    return result.toString();
+}
+                                    
