@@ -1,241 +1,349 @@
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-private static String cleanJavaCode(String code) {
+public class CommentRemover {
 
-    // 1. Remove comments first
-    code = removeComments(code);
+    public static void main(String[] args) {
 
-    // 2. Add IllegalArgumentException only if the
-    // generic catch does not already have a preceding catch.
-    java.util.regex.Pattern pattern =
-        java.util.regex.Pattern.compile(
-            "(?s)(catch\\s*\\(\\s*([\\w.$]+)\\s+\\w+\\s*\\)" +
-            "\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*)?" +
-            "catch\\s*\\(\\s*Exception\\s+(\\w+)\\s*\\)"
-        );
+        Scanner sc = new Scanner(System.in);
 
-    java.util.regex.Matcher matcher = pattern.matcher(code);
-    StringBuffer result = new StringBuffer();
+        try {
+            System.out.print("Enter input Java file/folder path: ");
+            Path inputPath = Paths.get(sc.nextLine().trim())
+                    .toAbsolutePath().normalize();
 
-    while (matcher.find()) {
-        String previousCatch = matcher.group(1);
-        String previousType = matcher.group(2);
-        String variable = matcher.group(3);
+            System.out.print("Enter output folder path: ");
+            Path outputPath = Paths.get(sc.nextLine().trim())
+                    .toAbsolutePath().normalize();
 
-        if (previousCatch == null
-                || "Exception".equals(previousType)
-                || "Throwable".equals(previousType)) {
+            if (!Files.exists(inputPath)) {
+                System.out.println("Input path does not exist!");
+                return;
+            }
 
-            matcher.appendReplacement(
-                result,
-                java.util.regex.Matcher.quoteReplacement(
-                    "catch (IllegalArgumentException e) {\n" +
-                    "    throw e;\n" +
-                    "} catch (Exception " + variable + ")"
-                )
-            );
-        } else {
-            matcher.appendReplacement(
-                result,
-                java.util.regex.Matcher.quoteReplacement(
-                    matcher.group()
-                )
-            );
+            if (inputPath.startsWith(outputPath)
+                    || outputPath.startsWith(inputPath)) {
+                System.out.println(
+                    "Input and output paths must be separate.");
+                return;
+            }
+
+            List<Path> javaFiles = new ArrayList<>();
+
+            if (Files.isRegularFile(inputPath)) {
+                if (!inputPath.toString().endsWith(".java")) {
+                    System.out.println("Please provide a .java file.");
+                    return;
+                }
+                javaFiles.add(inputPath);
+
+            } else if (Files.isDirectory(inputPath)) {
+                try (Stream<Path> paths = Files.walk(inputPath)) {
+                    javaFiles = paths
+                            .filter(Files::isRegularFile)
+                            .filter(p -> p.toString().endsWith(".java"))
+                            .collect(Collectors.toList());
+                }
+            } else {
+                System.out.println(
+                    "Input must be a Java file or directory.");
+                return;
+            }
+
+            for (Path file : javaFiles) {
+
+                Path relativePath;
+
+                if (Files.isDirectory(inputPath)) {
+                    relativePath = inputPath.relativize(file);
+                } else {
+                    relativePath = file.getFileName();
+                }
+
+                Path outputFile = outputPath.resolve(relativePath);
+
+                Files.createDirectories(outputFile.getParent());
+
+                String source = new String(
+                        Files.readAllBytes(file),
+                        StandardCharsets.UTF_8);
+
+                String cleanedCode = cleanJavaCode(source);
+
+                Files.write(
+                        outputFile,
+                        cleanedCode.getBytes(StandardCharsets.UTF_8));
+
+                System.out.println("Processed: " + relativePath);
+            }
+
+            System.out.println(
+                    "Total Java files processed: " + javaFiles.size());
+            System.out.println("Cleaning completed.");
+
+        } catch (IOException e) {
+            System.out.println("File error: " + e.getMessage());
+        } catch (InvalidPathException e) {
+            System.out.println("Invalid path: " + e.getMessage());
+        } finally {
+            sc.close();
         }
     }
 
-    matcher.appendTail(result);
-    code = result.toString();
+    // Run all cleanup operations
+    private static String cleanJavaCode(String code) {
 
-    // 3. Replace printStackTrace() with getMessage()
-    code = code.replaceAll(
-        "\\b(\\w+)\\.printStackTrace\\s*\\(\\s*\\)",
-        "$1.getMessage()"
-    );
+        code = removeComments(code);
+        code = addSpecificCatch(code);
 
-    // 4. Remove empty System.out.print/println statements
-    code = code.replaceAll(
-        "System\\s*\\.\\s*out\\s*\\.\\s*" +
-        "print(?:ln)?\\s*\\(\\s*(?:\"\\s*\")?\\s*\\)\\s*;",
-        ""
-    );
+        // Replace e.printStackTrace() with e.getMessage()
+        code = code.replaceAll(
+                "\\b(\\w+)\\.printStackTrace\\s*\\(\\s*\\)",
+                "$1.getMessage()");
 
-    // 5. Remove unused regular and static imports
-    code = removeUnusedImports(code);
+        // Remove empty System.out.print() and println()
+        code = code.replaceAll(
+                "System\\s*\\.\\s*out\\s*\\.\\s*" +
+                "print(?:ln)?\\s*\\(\\s*(?:\"\\s*\")?\\s*\\)\\s*;",
+                "");
 
-    return code;
-}
+        code = removeUnusedImports(code);
 
-private static String removeUnusedImports(String code) {
-
-    java.util.regex.Pattern importPattern =
-        java.util.regex.Pattern.compile(
-            "(?m)^\\s*import\\s+(static\\s+)?" +
-            "([\\w.]+(?:\\.\\*)?)\\s*;[^\\S\\r\\n]*"
-        );
-
-    java.util.regex.Matcher matcher =
-        importPattern.matcher(code);
-
-    StringBuffer result = new StringBuffer();
-
-    while (matcher.find()) {
-
-        String staticPart = matcher.group(1);
-        String imported = matcher.group(2);
-
-        // Keep wildcard imports; usage cannot be determined
-        // reliably with this lightweight approach.
-        if (imported.endsWith(".*")) {
-            matcher.appendReplacement(
-                result,
-                java.util.regex.Matcher.quoteReplacement(
-                    matcher.group()
-                )
-            );
-            continue;
-        }
-
-        String simpleName = imported.substring(
-            imported.lastIndexOf('.') + 1
-        );
-
-        // For static imports, check the imported member name.
-        // For ordinary imports, check the class name.
-        String remaining = code.substring(0, matcher.start())
-                + code.substring(matcher.end());
-
-        java.util.regex.Pattern usagePattern =
-            java.util.regex.Pattern.compile(
-                "\\b" + java.util.regex.Pattern.quote(simpleName)
-                + "\\b"
-            );
-
-        boolean used = usagePattern.matcher(remaining).find();
-
-        if (!used) {
-            matcher.appendReplacement(result, "");
-        } else {
-            matcher.appendReplacement(
-                result,
-                java.util.regex.Matcher.quoteReplacement(
-                    matcher.group()
-                )
-            );
-        }
+        return code;
     }
 
-    matcher.appendTail(result);
-    return result.toString();
-}
+    // Remove comments except those containing CR or IR followed by a space
+    private static String removeComments(String code) {
 
+        StringBuilder result = new StringBuilder();
+        int i = 0;
+        int length = code.length();
 
+        while (i < length) {
 
+            char c = code.charAt(i);
 
+            // Preserve Java text blocks
+            if (c == '"' && i + 2 < length
+                    && code.startsWith("\"\"\"", i)) {
 
+                result.append("\"\"\"");
+                i += 3;
 
-private static String removeComments(String code) {
+                while (i < length) {
 
-    StringBuilder result = new StringBuilder();
-    int i = 0;
-    int length = code.length();
-
-    while (i < length) {
-
-        char c = code.charAt(i);
-
-        // Preserve strings
-        if (c == '"') {
-            result.append(c);
-            i++;
-
-            while (i < length) {
-                char ch = code.charAt(i++);
-                result.append(ch);
-
-                if (ch == '\\' && i < length) {
-                    result.append(code.charAt(i++));
-                } else if (ch == '"') {
-                    break;
-                }
-            }
-
-        // Preserve character literals
-        } else if (c == '\'') {
-            result.append(c);
-            i++;
-
-            while (i < length) {
-                char ch = code.charAt(i++);
-                result.append(ch);
-
-                if (ch == '\\' && i < length) {
-                    result.append(code.charAt(i++));
-                } else if (ch == '\'') {
-                    break;
-                }
-            }
-
-        // Single-line comment
-        } else if (c == '/' && i + 1 < length
-                && code.charAt(i + 1) == '/') {
-
-            int start = i;
-            i += 2;
-
-            while (i < length
-                    && code.charAt(i) != '\n'
-                    && code.charAt(i) != '\r') {
-                i++;
-            }
-
-            String comment = code.substring(start, i);
-
-            if (comment.matches("(?s).*\\bCR\\b.*")
-                    || comment.contains("IR ")) {
-                result.append(comment);
-            }
-
-        // Multiline comment or JavaDoc
-        } else if (c == '/' && i + 1 < length
-                && code.charAt(i + 1) == '*') {
-
-            int start = i;
-            i += 2;
-
-            while (i + 1 < length
-                    && !(code.charAt(i) == '*'
-                    && code.charAt(i + 1) == '/')) {
-                i++;
-            }
-
-            if (i + 1 < length) {
-                i += 2;
-            } else {
-                i = length;
-            }
-
-            String comment = code.substring(start, i);
-
-            if (comment.matches("(?s).*\\bCR\\b.*")
-                    || comment.contains("IR ")) {
-                result.append(comment);
-            } else {
-                // Preserve line breaks when removing comments
-                for (int j = 0; j < comment.length(); j++) {
-                    if (comment.charAt(j) == '\n'
-                            || comment.charAt(j) == '\r') {
-                        result.append(comment.charAt(j));
+                    if (code.charAt(i) == '\\') {
+                        result.append(code.charAt(i++));
+                        if (i < length) {
+                            result.append(code.charAt(i++));
+                        }
+                    } else if (i + 2 < length
+                            && code.startsWith("\"\"\"", i)) {
+                        result.append("\"\"\"");
+                        i += 3;
+                        break;
+                    } else {
+                        result.append(code.charAt(i++));
                     }
                 }
-            }
 
-        } else {
-            result.append(c);
-            i++;
+            // Preserve ordinary string literals
+            } else if (c == '"') {
+
+                result.append(code.charAt(i++));
+
+                while (i < length) {
+                    char ch = code.charAt(i++);
+                    result.append(ch);
+
+                    if (ch == '\\' && i < length) {
+                        result.append(code.charAt(i++));
+                    } else if (ch == '"') {
+                        break;
+                    }
+                }
+
+            // Preserve character literals
+            } else if (c == '\'') {
+
+                result.append(code.charAt(i++));
+
+                while (i < length) {
+                    char ch = code.charAt(i++);
+                    result.append(ch);
+
+                    if (ch == '\\' && i < length) {
+                        result.append(code.charAt(i++));
+                    } else if (ch == '\'') {
+                        break;
+                    }
+                }
+
+            // Single-line comments
+            } else if (c == '/' && i + 1 < length
+                    && code.charAt(i + 1) == '/') {
+
+                int start = i;
+                i += 2;
+
+                while (i < length
+                        && code.charAt(i) != '\n'
+                        && code.charAt(i) != '\r') {
+                    i++;
+                }
+
+                String comment = code.substring(start, i);
+
+                if (shouldPreserveComment(comment)) {
+                    result.append(comment);
+                }
+
+            // Multiline comments and JavaDoc
+            } else if (c == '/' && i + 1 < length
+                    && code.charAt(i + 1) == '*') {
+
+                int start = i;
+                i += 2;
+
+                while (i + 1 < length
+                        && !(code.charAt(i) == '*'
+                        && code.charAt(i + 1) == '/')) {
+                    i++;
+                }
+
+                if (i + 1 < length) {
+                    i += 2;
+                } else {
+                    i = length;
+                }
+
+                String comment = code.substring(start, i);
+
+                if (shouldPreserveComment(comment)) {
+                    result.append(comment);
+                } else {
+                    // Keep line breaks to preserve source layout
+                    for (int j = 0; j < comment.length(); j++) {
+                        char ch = comment.charAt(j);
+                        if (ch == '\n' || ch == '\r') {
+                            result.append(ch);
+                        }
+                    }
+                }
+
+            } else {
+                result.append(c);
+                i++;
+            }
         }
+
+        return result.toString();
     }
 
-    return result.toString();
+    private static boolean shouldPreserveComment(String comment) {
+
+        // CR must be a complete, case-sensitive word
+        // IR must be followed by a literal space
+        return Pattern.compile("\\bCR\\b").matcher(comment).find()
+                || comment.contains("IR ");
+    }
+
+    // Insert IllegalArgumentException before a generic catch
+    // only when there is no immediately preceding catch clause.
+    private static String addSpecificCatch(String code) {
+
+        Pattern pattern = Pattern.compile(
+                "(?s)(catch\\s*\\(\\s*([\\w.$]+)\\s+" +
+                "\\w+\\s*\\)\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*)?" +
+                "catch\\s*\\(\\s*Exception\\s+(\\w+)\\s*\\)");
+
+        Matcher matcher = pattern.matcher(code);
+        StringBuffer result = new StringBuffer();
+
+        while (matcher.find()) {
+
+            String previousCatch = matcher.group(1);
+            String previousType = matcher.group(2);
+            String variable = matcher.group(3);
+
+            if (previousCatch == null) {
+
+                String replacement =
+                        "catch (IllegalArgumentException e) {\n" +
+                        "    throw e;\n" +
+                        "} catch (Exception " + variable + ")";
+
+                matcher.appendReplacement(
+                        result,
+                        Matcher.quoteReplacement(replacement));
+
+            } else {
+                // A catch already precedes the generic catch.
+                // Leave the existing catch chain unchanged.
+                matcher.appendReplacement(
+                        result,
+                        Matcher.quoteReplacement(matcher.group()));
+            }
+        }
+
+        matcher.appendTail(result);
+        return result.toString();
+    }
+
+    // Best-effort removal of unused explicit imports
+    private static String removeUnusedImports(String code) {
+
+        Pattern importPattern = Pattern.compile(
+                "(?m)^\\s*import\\s+(static\\s+)?" +
+                "([\\w.]+(?:\\.\\*)?)\\s*;[^\\S\\r\\n]*");
+
+        Matcher matcher = importPattern.matcher(code);
+        StringBuffer result = new StringBuffer();
+
+        while (matcher.find()) {
+
+            String imported = matcher.group(2);
+
+            // Keep wildcard imports
+            if (imported.endsWith(".*")) {
+                matcher.appendReplacement(
+                        result,
+                        Matcher.quoteReplacement(matcher.group()));
+                continue;
+            }
+
+            String simpleName = imported.substring(
+                    imported.lastIndexOf('.') + 1);
+
+            String remaining =
+                    code.substring(0, matcher.start())
+                    + code.substring(matcher.end());
+
+            Pattern usagePattern = Pattern.compile(
+                    "\\b" + Pattern.quote(simpleName) + "\\b");
+
+            boolean used = usagePattern.matcher(remaining).find();
+
+            if (used) {
+                matcher.appendReplacement(
+                        result,
+                        Matcher.quoteReplacement(matcher.group()));
+            } else {
+                matcher.appendReplacement(result, "");
+            }
+        }
+
+        matcher.appendTail(result);
+        return result.toString();
+    }
 }
-                                    
+                        
