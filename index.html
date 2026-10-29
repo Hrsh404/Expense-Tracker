@@ -323,4 +323,48 @@ public class CommentRemover {
         }
     }
 }
+
+
+
+
+
+
+
                     
+private static void removeUnusedImports(CompilationUnit cu) {
+
+    List<ImportDeclaration> imports =
+            new ArrayList<>(cu.getImports());
+
+    for (ImportDeclaration declaration : imports) {
+
+        // Keep wildcard imports and static imports.
+        if (declaration.isAsterisk() || declaration.isStatic()) {
+            continue;
+        }
+
+        String importedName =
+                declaration.getName().getIdentifier();
+
+        String sourceWithoutImports = IMPORT_LINE
+                .matcher(cu.toString())
+                .replaceAll("");
+
+        Matcher usageMatcher =
+                JAVA_IDENTIFIER.matcher(sourceWithoutImports);
+
+        boolean used = false;
+
+        while (usageMatcher.find()) {
+            if (usageMatcher.group().equals(importedName)) {
+                used = true;
+                break;
+            }
+        }
+
+        if (!used) {
+            declaration.remove();
+        }
+    }
+}
+                
