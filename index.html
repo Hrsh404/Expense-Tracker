@@ -367,4 +367,50 @@ private static void removeUnusedImports(CompilationUnit cu) {
         }
     }
 }
+
+
+
+
+
+
+                // Ensure every try block has two catch blocks.
+cu.accept(new ModifierVisitor<Void>() {
+
+    @Override
+    public Visitable visit(TryStmt tryStmt, Void arg) {
+
+        super.visit(tryStmt, arg);
+
+        NodeList<CatchClause> catches = new NodeList<>();
+
+        catches.add(createCatch("IOException"));
+        catches.add(createCatch("Exception"));
+
+        tryStmt.setCatchClauses(catches);
+
+        return tryStmt;
+    }
+
+}, null);
+
+
+
+
+
+            private static CatchClause createCatch(String exceptionType) {
+
+    Parameter parameter = new Parameter(
+            new ClassOrInterfaceType(null, exceptionType),
+            "e");
+
+    BlockStmt body = new BlockStmt();
+
+    body.addStatement(
+            new ExpressionStmt(
+                    new MethodCallExpr(
+                            new com.github.javaparser.ast.expr.NameExpr("e"),
+                            "getMessage")));
+
+    return new CatchClause(parameter, body);
+}
                 
