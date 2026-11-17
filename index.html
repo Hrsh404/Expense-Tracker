@@ -413,4 +413,13 @@ cu.accept(new ModifierVisitor<Void>() {
 
     return new CatchClause(parameter, body);
 }
-                
+
+
+
+
+
+
+            java -Djavax.net.debug=ssl:handshake \
+     -Dcom.ibm.mq.cfg.useIBMCipherMappings=false \
+     -Dcom.ibm.mq.cfg.SSL.Protocols=TLSv1.2 \
+     -jar yourapp.jar > ssl-debug.log 2>&1
