@@ -1,425 +1,358 @@
+package com.tcs.cbslite.notifications.util;
 
-import com.github.javaparser.JavaParser;
-import com.github.javaparser.ParseResult;
-import com.github.javaparser.ParserConfiguration;
-import com.github.javaparser.ast.CompilationUnit;
-import com.github.javaparser.ast.Node;
-import com.github.javaparser.ast.NodeList;
-import com.github.javaparser.ast.body.VariableDeclarator;
-import com.github.javaparser.ast.expr.Expression;
-import com.github.javaparser.ast.expr.MethodCallExpr;
-import com.github.javaparser.ast.stmt.BlockStmt;
-import com.github.javaparser.ast.stmt.ExpressionStmt;
-import com.github.javaparser.ast.stmt.Statement;
-import com.github.javaparser.ast.stmt.TryStmt;
-import com.github.javaparser.ast.visitor.ModifierVisitor;
-import com.github.javaparser.ast.visitor.Visitable;
-import com.github.javaparser.ast.type.ClassOrInterfaceType;
-import com.github.javaparser.ast.body.Parameter;
-import com.github.javaparser.ast.stmt.CatchClause;
-import com.github.javaparser.ast.comments.Comment;
-import com.github.javaparser.ast.ImportDeclaration;
-
+import java.io.BufferedReader;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.UnsupportedEncodingException;
+import java.net.ConnectException;
+import java.net.MalformedURLException;
+import java.net.SocketTimeoutException;
+import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
+import java.security.KeyStore;
+import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
-public class CommentRemover {
-
-    private static final Pattern PRESERVED_CR =
-            Pattern.compile("\\bCR\\b", Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern IMPORT_LINE =
-            Pattern.compile("(?m)^\\s*import\\s+[^;]+;\\s*");
-
-    private static final Pattern JAVA_IDENTIFIER =
-            Pattern.compile("\\b[A-Za-z_$][A-Za-z0-9_$]*\\b");
-
-    public static void main(String[] args) {
-
-        try {
-            java.util.Scanner scanner =
-                    new java.util.Scanner(System.in);
-
-            System.out.print("Enter workspace root folder: ");
-            Path input = Paths.get(scanner.nextLine().trim())
-                    .toAbsolutePath().normalize();
-
-            System.out.print("Enter output workspace folder: ");
-            Path output = Paths.get(scanner.nextLine().trim())
-                    .toAbsolutePath().normalize();
-
-            scanner.close();
-
-            if (!Files.isDirectory(input)) {
-                System.out.println(
-                        "Input must be an existing workspace directory.");
-                return;
-            }
-
-            if (input.equals(output)
-                    || input.startsWith(output)
-                    || output.startsWith(input)) {
-                System.out.println(
-                        "Input and output folders must be separate.");
-                return;
-            }
-
-            processWorkspace(input, output);
-
-            System.out.println("Workspace processing completed.");
-
-        } catch (IOException e) {
-            System.out.println("File error: " + e.getMessage());
-        } catch (InvalidPathException e) {
-            System.out.println("Invalid path: " + e.getMessage());
-        }
-    }
-
-    private static void processWorkspace(
-            Path input, Path output) throws IOException {
-
-        Files.createDirectories(output);
-
-        try (Stream<Path> paths = Files.walk(input)) {
-
-            paths.forEach(source -> {
-                try {
-                    Path relative = input.relativize(source);
-                    Path destination = output.resolve(relative);
-
-                    if (Files.isDirectory(source)) {
-                        Files.createDirectories(destination);
-                        return;
-                    }
-
-                    Files.createDirectories(destination.getParent());
-
-                    if (source.getFileName().toString()
-                            .endsWith(".java")) {
-
-                        String code = Files.readString(
-                                source, StandardCharsets.UTF_8);
-
-                        String cleaned = cleanJavaCode(code);
-
-                        Files.writeString(
-                                destination,
-                                cleaned,
-                                StandardCharsets.UTF_8);
-
-                        System.out.println("Processed: " + relative);
-
-                    } else {
-                        Files.copy(
-                                source,
-                                destination,
-                                StandardCopyOption.REPLACE_EXISTING);
-                    }
-
-                } catch (IOException e) {
-                    throw new java.io.UncheckedIOException(e);
-                }
-            });
-
-        } catch (java.io.UncheckedIOException e) {
-            throw e.getCause();
-        }
-    }
-
-    private static String cleanJavaCode(String code) {
-
-        ParserConfiguration configuration =
-                new ParserConfiguration();
-
-        configuration.setLanguageLevel(
-                ParserConfiguration.LanguageLevel.BLEEDING_EDGE);
-
-        JavaParser parser = new JavaParser(configuration);
-
-        ParseResult<CompilationUnit> parsed =
-                parser.parse(code);
-
-        if (!parsed.isSuccessful() || !parsed.getResult().isPresent()) {
-            throw new IllegalArgumentException(
-                    "Unable to parse Java source. Original source must "
-                    + "be reviewed before transformation.");
-        }
-
-        CompilationUnit cu = parsed.getResult().get();
-
-        // Remove comments except comments containing CR in any case.
-        for (Comment comment :
-                new ArrayList<>(cu.getAllComments())) {
-
-            if (!PRESERVED_CR.matcher(comment.getContent()).find()) {
-                comment.remove();
-            }
-        }
-
-        // Remove logging statements and printStackTrace calls.
-        cu.accept(new ModifierVisitor<Void>() {
-
-            @Override
-            public Visitable visit(
-                    ExpressionStmt statement, Void arg) {
-
-                Expression expression = statement.getExpression();
-
-                if (expression.isMethodCallExpr()
-                        && shouldRemoveCall(
-                                expression.asMethodCallExpr())) {
-                    return null;
-                }
-
-                return super.visit(statement, arg);
-            }
-
-        }, null);
-
-        // Every try block receives exactly two catch clauses.
-        // Existing catch bodies are replaced with message extraction.
-        cu.accept(new ModifierVisitor<Void>() {
-
-            @Override
-            public Visitable visit(TryStmt tryStmt, Void arg) {
-
-                super.visit(tryStmt, arg);
-
-                NodeList<CatchClause> catches = new NodeList<>();
-
-                catches.add(createCatch("IllegalArgumentException"));
-                catches.add(createCatch("Exception"));
-
-                tryStmt.setCatchClauses(catches);
-
-                return tryStmt;
-            }
-
-        }, null);
-
-        // Remove apparently unused explicit imports.
-        removeUnusedImports(cu);
-
-        return cu.toString();
-    }
-
-    private static CatchClause createCatch(String exceptionType) {
-
-        Parameter parameter = new Parameter(
-                new ClassOrInterfaceType(null, exceptionType),
-                "e");
-
-        BlockStmt body = new BlockStmt();
-
-        VariableDeclarator errorMessage = new VariableDeclarator(
-                new ClassOrInterfaceType(null, "String"),
-                "errorMessage",
-                new MethodCallExpr(
-                        new com.github.javaparser.ast.expr.NameExpr("e"),
-                        "getMessage"));
-
-        body.addStatement(
-                new com.github.javaparser.ast.stmt.ExpressionStmt(
-                        new com.github.javaparser.ast.expr.VariableDeclarationExpr(
-                                errorMessage)));
-
-        return new CatchClause(parameter, body);
-    }
-
-    private static boolean shouldRemoveCall(MethodCallExpr call) {
-
-        String expression = call.toString();
-        String methodName = call.getNameAsString();
-
-        // Remove printStackTrace() calls.
-        if (methodName.equals("printStackTrace")) {
-            return true;
-        }
-
-        // Remove System.out and System.err output calls.
-        if (expression.matches(
-                "(?s)System\\s*\\.\\s*(out|err)\\s*\\.\\s*"
-                + "(print|println|printf)\\s*\\(.*")) {
-            return true;
-        }
-
-        // Remove common logging framework calls at every level.
-        if (call.getScope().isPresent()) {
-
-            String scope = call.getScope().get().toString();
-            String lowerMethod =
-                    methodName.toLowerCase(Locale.ROOT);
-
-            boolean loggingLevel =
-                    lowerMethod.matches(
-                            "trace|debug|info|warn|error|fatal|"
-                            + "log|logp|severe|warning|fine|finer|finest");
-
-            boolean loggerScope =
-                    scope.matches(
-                            "(?s).*(logger|log|log4j|slf4j).*");
-
-            if (loggingLevel && loggerScope) {
-                return true;
-            }
-        }
-
-        // Remove empty print calls, including print("").
-        if (call.getScope().isPresent()
-                && call.getScope().get().toString()
-                        .matches("System\\s*\\.\\s*out")
-                && (methodName.equals("print")
-                    || methodName.equals("println"))
-                && (call.getArguments().isEmpty()
-                    || call.getArguments().size() == 1
-                    && call.getArgument(0).isStringLiteralExpr()
-                    && call.getArgument(0)
-                            .asStringLiteralExpr()
-                            .asString().trim().isEmpty())) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private static void removeUnusedImports(CompilationUnit cu) {
-
-        List<ImportDeclaration> imports =
-                new ArrayList<>(cu.getImports());
-
-        for (ImportDeclaration declaration : imports) {
-
-            if (declaration.isAsterisk()) {
-                continue;
-            }
-
-            String importedName =
-                    declaration.getName().getIdentifier();
-
-            if (declaration.isStatic()) {
-                // Static imports need more careful resolution.
-                continue;
-            }
-
-            String sourceWithoutImports = IMPORT_LINE
-                    .matcher(cu.toString())
-                    .replaceAll("");
-
-            boolean used = JAVA_IDENTIFIER
-                    .matcher(sourceWithoutImports)
-                    .results()
-                    .anyMatch(match ->
-                            match.group().equals(importedName));
-
-            if (!used) {
-                declaration.remove();
-            }
-        }
-    }
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
+
+import org.apache.http.HttpEntity;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.conn.ConnectionPoolTimeoutException;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import com.tcs.cbslite.notifications.constants.ErrorMessages;
+import com.tcs.cbslite.notifications.constants.NeConstants;
+import com.tcs.cbslite.notifications.launcher.NE_ReadSmsQLauncher;
+import com.tcs.cbslite.notifications.logger.NePropertyFileReader;
+import sun.misc.BASE64Encoder;
+
+public class SendSMS {
+
+	private static String encKsPath, decKsPath;
+	static {
+		encKsPath = NePropertyFileReader.getPropertyKeyValue(NeConstants.NE_PROPERTY_FILENAME.toString(),
+				"KEYSTORE_PATH");
+		String iv1 = NePropertyFileReader.getPropertyKeyValue(NeConstants.NE_PROPERTY_FILENAME.toString(),
+				NeConstants.IV.toString());
+		String key1 = NePropertyFileReader.getPropertyKeyValue(NeConstants.NE_PROPERTY_FILENAME.toString(),
+				NeConstants.Key.toString());
+		try {
+			decKsPath = AESdecrypt.aesDecrypt(key1, iv1, encKsPath);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	private static final Logger logger = LogManager.getLogger(NE_ReadSmsQLauncher.class);
+
+	// CHANGED: returns Map<String,String> with keys: code, umid, errorMessage
+	public static Map<String, String> sendtoSMSGateway(String mobileNo, String message, int timeout,
+			Map<String, Object> smsdataMap, String isdCode, String reqType, Long requestid, String langCode) {
+		String mobileNumber = "";
+		CloseableHttpClient httpClient = null;
+		CloseableHttpResponse responses = null;
+		HashMap<String, String> responsemap = new HashMap<>();
+		try {
+			String requestParams = "";
+			String smsBaseURL = "";
+			String smsdCode = "";
+			String smsPwd = "";
+			String senderNo = "";
+			String smsUserID = "";
+			String intFlag = "";
+
+			Long isd = Long.valueOf("0");
+			if (isdCode != null && !isdCode.equals("")) {
+				isd = Long.valueOf(isdCode);
+			}
+			Long mobile = Long.valueOf("0");
+			if (mobileNo != null && !mobileNo.equals("")) {
+				mobile = Long.valueOf(mobileNo);
+			}
+			mobileNumber = isd.toString() + mobile.toString();
+			smsdataMap.put("gateway", "NEWSMSMAP");
+			logger.info("SMS through New SMS Appliance");
+
+			if (smsdataMap.get("genType").equals("OFF") || smsdataMap.get("genType").equals("OFL")) {
+				smsBaseURL = NE_ReadSmsQLauncher.SMS_NEW_URL_OFL;
+				if (isd.compareTo(Long.valueOf("91")) == 0) {
+					smsdCode = NE_ReadSmsQLauncher.nsa_off_dcode_dom;
+					smsUserID = NE_ReadSmsQLauncher.nsa_off_user_dom;
+					smsPwd = AESdecrypt.aesDecrypt1(NE_ReadSmsQLauncher.nsa_off_passwd_dom);
+					senderNo = NE_ReadSmsQLauncher.nsa_off_senderno_dom;
+					intFlag = NE_ReadSmsQLauncher.int_flag_dom;
+					logger.info("User mapped for offline domestic SMS:" + smsUserID);
+					logger.debug("For Offline :" + smsdCode + smsUserID + senderNo);
+				} else {
+					smsdCode = NE_ReadSmsQLauncher.nsa_off_dcode_int;
+					smsUserID = NE_ReadSmsQLauncher.nsa_off_user_int;
+					smsPwd = AESdecrypt.aesDecrypt1(NE_ReadSmsQLauncher.nsa_off_passwd_int);
+					senderNo = NE_ReadSmsQLauncher.nsa_off_senderno_int;
+					intFlag = NE_ReadSmsQLauncher.int_flag_int;
+					logger.info("User mapped for offline international SMS:" + smsUserID);
+					logger.debug("For Offline Int:" + smsdCode + smsUserID + senderNo);
+				}
+			} else {
+				smsBaseURL = NE_ReadSmsQLauncher.SMS_NEW_URL_ONL;
+				if (isd.compareTo(Long.valueOf("91")) == 0) {
+					smsdCode = NE_ReadSmsQLauncher.nsa_onl_dcode_dom;
+					smsUserID = NE_ReadSmsQLauncher.nsa_onl_user_dom;
+					smsPwd = AESdecrypt.aesDecrypt1(NE_ReadSmsQLauncher.nsa_onl_passwd_dom);
+					senderNo = NE_ReadSmsQLauncher.nsa_onl_senderno_dom;
+					intFlag = NE_ReadSmsQLauncher.int_flag_dom;
+					logger.info("User mapped for online domestic SMS:" + smsUserID);
+					logger.debug("For Online :" + smsdCode + smsUserID + senderNo);
+				} else {
+					smsdCode = NE_ReadSmsQLauncher.nsa_onl_dcode_int;
+					smsUserID = NE_ReadSmsQLauncher.nsa_onl_user_int;
+					smsPwd = AESdecrypt.aesDecrypt1(NE_ReadSmsQLauncher.nsa_onl_passwd_int);
+					senderNo = NE_ReadSmsQLauncher.nsa_onl_senderno_int;
+					intFlag = NE_ReadSmsQLauncher.int_flag_int;
+					logger.info("User mapped for online international SMS:" + smsUserID);
+					logger.debug("For Online Int:" + smsdCode + smsUserID + senderNo);
+				}
+			}
+
+			if (langCode.equals("00") || smsdataMap.get("smsLang").toString().equals("E")) {
+				// Start of CR:22040046
+				message = URLEncoder.encode(message);
+				// End of CR:22040046
+				logger.info("English SMS");
+				requestParams = "content_type=text&sender_id=" + senderNo + "&mobile=" + mobileNumber + "&message="
+						+ message + "&intflag=" + intFlag + "&charging=" + NE_ReadSmsQLauncher.charging_flag;
+				logger.info(requestid + " : Request Params :" + requestParams);
+			} else {
+				// Multilingual changes
+				logger.info("Unicode SMS");
+				requestParams = "content_type=unicode&sender_id=" + senderNo + "&mobile=" + mobileNumber
+						+ "&message=" + message + "&intflag=" + intFlag + "&charging="
+						+ NE_ReadSmsQLauncher.charging_flag;
+				logger.info(requestid + " : Request Params :" + requestParams);
+				// Multilingual changes
+			}
+			logger.debug(requestid + " SMS request:" + requestParams);
+			String link = smsBaseURL + smsUserID;
+			try {
+				System.setProperty("javax.net.ssl.trustStore", decKsPath);
+				System.setProperty("javax.net.ssl.trustStorePassword", "changeit");
+				System.setProperty("javax.net.ssl.trustStoreType", "JKS");
+				System.setProperty("sun.security.ssl.allowUnsafeRenegotiation", "true");
+			} catch (Exception e) {
+				e.printStackTrace();
+				return result(NeConstants.SMS_SENDING_FAILED.toString(), "", "");
+			}
+			KeyStore objKeyStoreServer;
+			TrustManagerFactory objFactory;
+			SSLContext objSslContext;
+			SSLSocketFactory objSslSocketFactory;
+			SecureRandom objSecureRandom = new SecureRandom();
+			objKeyStoreServer = KeyStore.getInstance("JKS");
+			try {
+				objKeyStoreServer.load(new FileInputStream(decKsPath), "changeit".toCharArray());
+				objKeyStoreServer.getCertificate("newsmscert");
+			} catch (CertificateException e) {
+				logger.error(e.getMessage());
+				return result(NeConstants.SMS_SENDING_FAILED.toString(), "", "");
+			}
+			objFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+			objFactory.init(objKeyStoreServer);
+			objSslContext = SSLContext.getInstance("SSL");
+			objSslContext.init(null, objFactory.getTrustManagers(), objSecureRandom);
+			objSslSocketFactory = objSslContext.getSocketFactory();
+			X509TrustManager o_X509TrustManager = (X509TrustManager) objFactory.getTrustManagers()[0];
+			HostnameVerifier hv = new HostnameVerifier() {
+				public boolean verify(String arg0, SSLSession arg1) {
+					return true;
+				}
+			};
+			trustAllHttpsCertificates();
+			HttpsURLConnection.setDefaultHostnameVerifier(hv);
+
+			logger.debug(requestid + " : Link for New SMS Appliance :" + link);
+
+			// Start of CR:23090079
+			httpClient = GatewayConnectionManager.getHttpclient(objSslContext);
+			// clean url
+			URL url = null;
+			try {
+				url = new URL(cleanUrl(link));
+			} catch (MalformedURLException e) {
+				logger.error(smsdataMap.get("requestId").toString() + " : Exception : " + e.getCause());
+				smsdataMap.put("sms_error_msg", ErrorMessages.ERR11.toString());
+			}
+			// clean url
+			String authstr = prepAuthStr(smsUserID.toString(), smsPwd.toString());
+			HttpPost httpPost = new HttpPost(link);
+			httpPost.setHeader("Content-Type", "application/x-www-form-urlencoded");
+			httpPost.setHeader("Authorization", authstr);
+			httpPost.setEntity(new StringEntity(requestParams, StandardCharsets.UTF_8.toString()));
+
+			responses = httpClient.execute(httpPost);
+
+			HttpEntity entity = responses.getEntity();
+
+			String code = ""; // old code returned "" when entity was null
+			String umid = "";
+			String errDesc = "";
+
+			if (entity != null) {
+				BufferedReader rd = new BufferedReader(new InputStreamReader(entity.getContent()));
+				String rawResponse = rd.readLine();
+				rd.close();
+				logger.info(requestid + " : Response from SMS gateway " + rawResponse);
+
+				// toString() kept on purpose: a null response still ends in the retry path as before
+				responsemap = Notification_Utility.gatewayResponseMap(rawResponse.toString());
+				code = responsemap.get("error_code");
+				errDesc = responsemap.get("error_desc");
+				smsdataMap.put("errorMessage", errDesc);
+
+				// NEW: umid
+				umid = responsemap.get("umid");
+				if (umid == null || umid.isEmpty()) {
+					umid = extractUmid(rawResponse);
+				}
+				smsdataMap.put("umid", umid == null ? "" : umid);
+			}
+			// End of CR:23090079
+
+			return result(code, umid, errDesc);
+
+		} catch (ConnectException ce) {
+			logger.error(requestid + " : SendSMS : 224 :" + ce.getMessage());
+			smsdataMap.put("errorMessage", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+			return result(NeConstants.GATEWAY_RETRY.toString(), "", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+
+		} catch (SocketTimeoutException ste) {
+			logger.error(requestid + " : SendSMS : SocketTimeoutException" + ste.getMessage());
+			smsdataMap.put("errorMessage", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+			return result(NeConstants.GATEWAY_RETRY.toString(), "", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+
+		} catch (ConnectionPoolTimeoutException cpte) {
+			logger.error(requestid + " : SendSMS : ConnectionPoolTimeoutException" + cpte.getMessage());
+			smsdataMap.put("errorMessage", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+			return result(NeConstants.GATEWAY_RETRY.toString(), "", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+
+		} catch (IOException e) {
+			logger.error(requestid + " : SendSMS : IOException" + e.getMessage());
+			smsdataMap.put("errorMessage", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+			return result(NeConstants.GATEWAY_RETRY.toString(), "", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+		} catch (Exception e) {
+			logger.error(requestid + " : Error while sending message to SMS gateway :" + e.getMessage());
+			e.printStackTrace();
+			smsdataMap.put("errorMessage", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+			return result(NeConstants.GATEWAY_RETRY.toString(), "", NeConstants.GATEWAY_CONNECTION_ERROR.toString());
+		} finally {
+			try {
+				if (responses != null) {
+					responses.close();
+				}
+			} catch (Exception e) {
+				e.printStackTrace();
+				smsdataMap.put("errorMessage", "");
+			}
+		}
+	}
+
+	// NEW: builds the Map<String,String> result
+	private static Map<String, String> result(String code, String umid, String errMsg) {
+		Map<String, String> m = new HashMap<String, String>();
+		m.put("code", code);
+		m.put("umid", umid == null ? "" : umid);
+		m.put("errorMessage", errMsg == null ? "" : errMsg);
+		return m;
+	}
+
+	// NEW: fallback parser for JSON or key=value responses
+	private static String extractUmid(String raw) {
+		if (raw == null) {
+			return null;
+		}
+		Matcher m = Pattern.compile("\"?umid\"?\\s*[:=]\\s*\"?([^\",&|}\\s]+)", Pattern.CASE_INSENSITIVE)
+				.matcher(raw);
+		return m.find() ? m.group(1) : null;
+	}
+
+	private static void trustAllHttpsCertificates() throws Exception {
+		javax.net.ssl.TrustManager[] trustAllCerts = new javax.net.ssl.TrustManager[1];
+		javax.net.ssl.TrustManager tm = new miTM();
+		trustAllCerts[0] = tm;
+		javax.net.ssl.SSLContext sc = javax.net.ssl.SSLContext.getInstance("SSL");
+		sc.init(null, trustAllCerts, null);
+		javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+	}
+
+	public static class miTM implements javax.net.ssl.TrustManager, javax.net.ssl.X509TrustManager {
+		public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+			return null;
+		}
+
+		public boolean isServerTrusted(java.security.cert.X509Certificate[] certs) {
+			return true;
+		}
+
+		public boolean isClientTrusted(java.security.cert.X509Certificate[] certs) {
+			return true;
+		}
+
+		public void checkServerTrusted(java.security.cert.X509Certificate[] certs, String authType)
+				throws java.security.cert.CertificateException {
+			return;
+		}
+
+		public void checkClientTrusted(java.security.cert.X509Certificate[] certs, String authType)
+				throws java.security.cert.CertificateException {
+			return;
+		}
+	}
+
+	// New Start for Unihex encoding
+	public static String encodeTounicodeHex(String text) throws UnsupportedEncodingException {
+		StringBuilder encodeText = new StringBuilder();
+		for (char c : text.toCharArray()) {
+			String hexRepresentation = String.format("\\u%04x", (int) c);
+			String encodeHex = URLEncoder.encode(hexRepresentation, "UTF-8");
+			encodeText.append(encodeHex);
+		}
+		return encodeText.toString();
+	}
+	// End for Unihex encoding
+
+	public static void main(String[] args) {
+	}
+
+	private static String prepAuthStr(String unm, String pswd) {
+		String authString = unm + ":" + pswd;
+		return "Basic " + new BASE64Encoder().encode(authString.getBytes());
+	}
+
+	//// url clean
+	public static String cleanUrl(String Link) {
+		Pattern pattern = Pattern.compile("^(https?://[^/]+)");
+		Matcher matcher = pattern.matcher(Link);
+		if (!matcher.find())
+			throw new IllegalArgumentException("Invalid Url format.");
+
+		String protocol = matcher.group(1);
+
+		String query = Link.substring(protocol.length());
+		query = query.replaceAll("//+", "/");
+		return protocol.concat(query);
+	}
 }
-
-
-
-
-
-
-
-                    
-private static void removeUnusedImports(CompilationUnit cu) {
-
-    List<ImportDeclaration> imports =
-            new ArrayList<>(cu.getImports());
-
-    for (ImportDeclaration declaration : imports) {
-
-        // Keep wildcard imports and static imports.
-        if (declaration.isAsterisk() || declaration.isStatic()) {
-            continue;
-        }
-
-        String importedName =
-                declaration.getName().getIdentifier();
-
-        String sourceWithoutImports = IMPORT_LINE
-                .matcher(cu.toString())
-                .replaceAll("");
-
-        Matcher usageMatcher =
-                JAVA_IDENTIFIER.matcher(sourceWithoutImports);
-
-        boolean used = false;
-
-        while (usageMatcher.find()) {
-            if (usageMatcher.group().equals(importedName)) {
-                used = true;
-                break;
-            }
-        }
-
-        if (!used) {
-            declaration.remove();
-        }
-    }
-}
-
-
-
-
-
-
-                // Ensure every try block has two catch blocks.
-cu.accept(new ModifierVisitor<Void>() {
-
-    @Override
-    public Visitable visit(TryStmt tryStmt, Void arg) {
-
-        super.visit(tryStmt, arg);
-
-        NodeList<CatchClause> catches = new NodeList<>();
-
-        catches.add(createCatch("IOException"));
-        catches.add(createCatch("Exception"));
-
-        tryStmt.setCatchClauses(catches);
-
-        return tryStmt;
-    }
-
-}, null);
-
-
-
-
-
-            private static CatchClause createCatch(String exceptionType) {
-
-    Parameter parameter = new Parameter(
-            new ClassOrInterfaceType(null, exceptionType),
-            "e");
-
-    BlockStmt body = new BlockStmt();
-
-    body.addStatement(
-            new ExpressionStmt(
-                    new MethodCallExpr(
-                            new com.github.javaparser.ast.expr.NameExpr("e"),
-                            "getMessage")));
-
-    return new CatchClause(parameter, body);
-}
-
-
-
-
-
-
-            java -Djavax.net.debug=ssl:handshake \
-     -Dcom.ibm.mq.cfg.useIBMCipherMappings=false \
-     -Dcom.ibm.mq.cfg.SSL.Protocols=TLSv1.2 \
-     -jar yourapp.jar > ssl-debug.log 2>&1
+            
